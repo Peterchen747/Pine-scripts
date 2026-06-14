@@ -1,5 +1,5 @@
 //@version=5
-indicator("SNR 3.0 HPA Reaction Model v2", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
+indicator("SNR 3.0 HPA Reaction Model v3", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
 
 // ============================================================
 // INPUT PARAMETERS
@@ -13,6 +13,10 @@ grp_expansion   = "Expansion Leg"
 exp_bars_min    = input.int(15,   "Min Bars for Expansion",              minval=5,  maxval=60,  group=grp_expansion)
 exp_bars_max    = input.int(30,   "Max Bars for Expansion",              minval=10, maxval=120, group=grp_expansion)
 exp_dir_pct     = input.float(80, "Min Directional Candle %",            minval=50, maxval=100, group=grp_expansion)
+// Quality filters
+exp_min_ticks   = input.float(150,"Min Leg Size (ticks)",                minval=10, maxval=2000,group=grp_expansion)
+exp_continuity  = input.float(40, "Min Continuity % (no bar overlap)",   minval=0,  maxval=100, group=grp_expansion)
+exp_momentum    = input.float(60, "Min Momentum % (close top/bot half)", minval=0,  maxval=100, group=grp_expansion)
 
 grp_liq         = "Liquidity Grab"
 liq_min_pts     = input.float(4,  "Liquidity Grab Min Points",           minval=1,  group=grp_liq)
@@ -22,11 +26,11 @@ liq_bars_back   = input.int(5,    "Bars to Confirm Return",              minval=
 grp_dxy         = "DXY Confirmation"
 use_dxy         = input.bool(true,  "Enable DXY Filter",                 group=grp_dxy)
 dxy_lookback    = input.int(10,   "DXY Reaction Lookback Bars",          minval=3,  maxval=50,  group=grp_dxy)
-dxy_sensitivity = input.float(0.15,"DXY Sensitivity % from Extreme",     minval=0.05, maxval=1.0, step=0.05, group=grp_dxy)
+dxy_sensitivity = input.float(0.15,"DXY Sensitivity % from Extreme",     minval=0.05,maxval=1.0,step=0.05,group=grp_dxy)
 
 grp_risk        = "Risk Management"
-risk_r_min      = input.float(1.5, "Minimum TP (R)",                     minval=0.5, step=0.5,  group=grp_risk)
-risk_r_max      = input.float(2.0, "Maximum TP (R)",                     minval=1.0, step=0.5,  group=grp_risk)
+risk_r_min      = input.float(1.5, "Minimum TP (R)",                     minval=0.5,step=0.5,  group=grp_risk)
+risk_r_max      = input.float(2.0, "Maximum TP (R)",                     minval=1.0,step=0.5,  group=grp_risk)
 sl_buffer_ticks = input.float(50,  "SL Buffer (ticks beyond structure)", minval=5,  maxval=500, group=grp_risk)
 
 grp_session     = "Session Filter"
@@ -88,9 +92,7 @@ if not na(pl)
 
 // ============================================================
 // SECTION 1 — MARKET STATE
-// A0-1: Only use pivots inside lookback window
-// A0-2: Swing amplitude threshold (filters range noise)
-// A0-3: No fallback — Unclear when pivots insufficient
+// A0: time-limited pivots, swing threshold, no fallback
 // ============================================================
 window_high = ta.highest(high, lookback_bars)
 window_low  = ta.lowest(low,  lookback_bars)
@@ -116,7 +118,7 @@ bull_trend = hh_hl and not ll_lh
 bear_trend = ll_lh and not hh_hl
 is_trend   = bull_trend or bear_trend
 
-// A: Range midpoint crossing count (≥2 required)
+// A: Range midpoint crossing count (≥2 required for valid range)
 f_count_mid_crosses(midline, len) =>
     int cnt = 0
     int cap = math.min(len, 400)
@@ -132,8 +134,6 @@ valid_range     = not is_trend and mid_cross_count >= 2
 
 // ============================================================
 // SECTION 2 — HPA CALCULATION
-// Trend: AB-leg 50% ± 5% band   Range: 25% zones
-// Unclear: all na (no signals)
 // ============================================================
 var float hpa_bull_top = na
 var float hpa_bull_bot = na
@@ -177,7 +177,6 @@ else
 
 // ============================================================
 // SECTION 2.5 — MULTI-TF HPA REFERENCE (G)
-// M15 (orange dashed) and H1 (yellow dashed) 25% zones
 // ============================================================
 _m15_lb = math.max(lookback_hrs * 4, 1)
 m15_wh  = request.security(syminfo.tickerid, "15", ta.highest(high, _m15_lb))
@@ -188,19 +187,23 @@ h1_wl   = request.security(syminfo.tickerid, "60", ta.lowest(low,   lookback_hrs
 m15_rng = not na(m15_wh) and not na(m15_wl) ? m15_wh - m15_wl : na
 h1_rng  = not na(h1_wh)  and not na(h1_wl)  ? h1_wh  - h1_wl  : na
 
-m15_bull_top = not na(m15_wl)  and not na(m15_rng) ? m15_wl  + m15_rng * 0.25 : na
+m15_bull_top = not na(m15_wl) and not na(m15_rng) ? m15_wl + m15_rng * 0.25 : na
 m15_bull_bot = m15_wl
 m15_bear_top = m15_wh
-m15_bear_bot = not na(m15_wh)  and not na(m15_rng) ? m15_wh  - m15_rng * 0.25 : na
-h1_bull_top  = not na(h1_wl)   and not na(h1_rng)  ? h1_wl   + h1_rng  * 0.25 : na
+m15_bear_bot = not na(m15_wh) and not na(m15_rng) ? m15_wh - m15_rng * 0.25 : na
+h1_bull_top  = not na(h1_wl)  and not na(h1_rng)  ? h1_wl  + h1_rng  * 0.25 : na
 h1_bull_bot  = h1_wl
 h1_bear_top  = h1_wh
-h1_bear_bot  = not na(h1_wh)   and not na(h1_rng)  ? h1_wh   - h1_rng  * 0.25 : na
+h1_bear_bot  = not na(h1_wh)  and not na(h1_rng)  ? h1_wh  - h1_rng  * 0.25 : na
 
 // ============================================================
-// SECTION 3 — EXPANSION LEG DETECTION
-// Manual high/low (avoids ta.highest inside loop-variable length)
-// Validates expansion endpoint lands inside HPA
+// SECTION 3 — EXPANSION LEG DETECTION  (v3: quality scoring)
+//
+// Quality 1 — Size:        total leg range >= exp_min_ticks
+// Quality 2 — Continuity:  % of bars where open does not overlap
+//                          previous bar's close (non-retracing bars)
+// Quality 3 — Momentum:    % of directional bars where close is
+//                          in the favorable half of the bar range
 // ============================================================
 f_check_expansion(direction, hpa_top, hpa_bot) =>
     bool  found      = false
@@ -208,61 +211,99 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
     int   exp_end    = 0
     float exp_low_p  = na
     float exp_high_p = na
+    // Quality scores exported for the last checked segment
+    int   q_size     = 0    // 1 if size ok
+    int   q_cont     = 0    // 1 if continuity ok
+    int   q_mom      = 0    // 1 if momentum ok
 
     for lb = exp_bars_min to exp_bars_max
         if bar_index >= lb and not found
+            // Manual high/low (avoids ta.highest with loop variable)
             float seg_h = high
             float seg_l = low
             for j = 1 to lb - 1
                 seg_h := math.max(seg_h, high[j])
                 seg_l := math.min(seg_l, low[j])
 
+            // Direction ratio
             int dir_cnt = 0
             for i = 0 to lb - 1
-                if direction == 1  and close[i] > open[i]
+                if direction ==  1 and close[i] > open[i]
                     dir_cnt += 1
                 if direction == -1 and close[i] < open[i]
                     dir_cnt += 1
 
             if 100.0 * dir_cnt / lb >= exp_dir_pct
-                float seg_rng  = seg_h - seg_l
-                bool  clean    = true
+                float seg_rng = seg_h - seg_l
+
+                // Existing cleanness check (no large opposing wick)
+                bool clean = true
                 for i = 1 to lb - 2
-                    if direction == 1  and (high[i]  - close[i]) > seg_rng * 0.30
+                    if direction ==  1 and (high[i]  - close[i]) > seg_rng * 0.30
                         clean := false
                     if direction == -1 and (close[i] - low[i])   > seg_rng * 0.30
                         clean := false
 
                 if clean
+                    // ── Quality 1: minimum leg size ──────────────────
+                    bool size_ok = seg_rng >= syminfo.mintick * exp_min_ticks
+
+                    // ── Quality 2: continuity (non-overlapping bars) ──
+                    int cont_cnt = 0
+                    for i = 0 to lb - 2
+                        if direction ==  1 and open[i] >= close[i + 1]
+                            cont_cnt += 1
+                        if direction == -1 and open[i] <= close[i + 1]
+                            cont_cnt += 1
+                    bool cont_ok = 100.0 * cont_cnt / math.max(lb - 1, 1) >= exp_continuity
+
+                    // ── Quality 3: momentum (close in favorable half) ─
+                    int mom_cnt = 0
+                    for i = 0 to lb - 1
+                        float br = math.max(high[i] - low[i], syminfo.mintick)
+                        if direction ==  1 and close[i] > open[i] and close[i] >= low[i]  + br * 0.5
+                            mom_cnt += 1
+                        if direction == -1 and close[i] < open[i] and close[i] <= high[i] - br * 0.5
+                            mom_cnt += 1
+                    bool mom_ok = dir_cnt > 0 and 100.0 * mom_cnt / dir_cnt >= exp_momentum
+
+                    // ── Endpoint in HPA ───────────────────────────────
                     bool ep_ok = false
                     if not na(hpa_top) and not na(hpa_bot)
-                        ep_ok := direction == 1 ?
+                        ep_ok := direction ==  1 ?
                              (seg_h >= hpa_bot and seg_h <= hpa_top * 1.01) :
                              (seg_l <= hpa_top and seg_l >= hpa_bot * 0.99)
                     else
                         ep_ok := true
-                    if ep_ok
+
+                    // Export quality scores (for info table)
+                    q_size := size_ok ? 1 : 0
+                    q_cont := cont_ok ? 1 : 0
+                    q_mom  := mom_ok  ? 1 : 0
+
+                    if ep_ok and size_ok and cont_ok and mom_ok
                         found      := true
                         exp_start  := bar_index - lb
                         exp_end    := bar_index
                         exp_low_p  := seg_l
                         exp_high_p := seg_h
 
-    [found, exp_start, exp_end, exp_low_p, exp_high_p]
+    [found, exp_start, exp_end, exp_low_p, exp_high_p, q_size, q_cont, q_mom]
 
-[bull_exp_found, bull_exp_start, bull_exp_end, bull_exp_low, bull_exp_high] =
+[bull_exp_found, bull_exp_start, bull_exp_end, bull_exp_low, bull_exp_high, bq_s, bq_c, bq_m] =
      f_check_expansion(1,  hpa_bull_top, hpa_bull_bot)
-[bear_exp_found, bear_exp_start, bear_exp_end, bear_exp_low, bear_exp_high] =
+[bear_exp_found, bear_exp_start, bear_exp_end, bear_exp_low, bear_exp_high, beq_s, beq_c, beq_m] =
      f_check_expansion(-1, hpa_bear_top, hpa_bear_bot)
 
 bull_exp_50 = not na(bull_exp_low) and not na(bull_exp_high) ? (bull_exp_low  + bull_exp_high) / 2 : na
 bear_exp_50 = not na(bear_exp_low) and not na(bear_exp_high) ? (bear_exp_low  + bear_exp_high) / 2 : na
 
+// Quality label for info table
+bull_q_score = bq_s + bq_c + bq_m
+bear_q_score = beq_s + beq_c + beq_m
+
 // ============================================================
 // SECTION 3.5 — 1-1-1 TRENDLINE AOI (B)
-// Bull TL: two swing lows projected forward
-// Bear TL: two swing highs projected forward
-// Solid line when projected value is inside HPA → AOI confirmed
 // ============================================================
 f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
     float tl_now = na
@@ -286,7 +327,6 @@ f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
 
 // ============================================================
 // SECTION 4 — LIQUIDITY GRAB DETECTION
-// Spike on prior bar, confirmed return on current or recent bars
 // ============================================================
 f_liq_bull() =>
     bool  g       = false
@@ -319,8 +359,6 @@ bear_liq_grab = f_liq_bear()
 
 // ============================================================
 // SECTION 5 — DXY CONFIRMATION  (D: DXY own HPA)
-// Gold long: DXY must drop AND be inside DXY top-25% zone
-// Gold short: DXY must rally AND be inside DXY bottom-25% zone
 // ============================================================
 dxy_close = request.security("DXY", timeframe.period, close)
 dxy_high  = request.security("DXY", timeframe.period, high)
@@ -352,14 +390,11 @@ bear_in_hpa = not na(hpa_bear_bot) and not na(hpa_bear_top) and
               high >= hpa_bear_bot and low <= hpa_bear_top
 
 // ============================================================
-// SECTION 7 — ENTRY SIGNALS  (E: session filter)
-// Type 5: prior confirmed bar broke structure
-// Type 1: BOS then retrace to 0.5
+// SECTION 7 — ENTRY SIGNALS
 // ============================================================
 type5_long  = bull_in_hpa and bull_exp_found and dxy_confirm_long  and high[1] > high[2] and in_session
 type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and low[1]  < low[2]  and in_session
 
-// Type 5 with 1-1-1 TL AOI confluence
 type5_long_tl  = type5_long  and bull_tl_in_hpa
 type5_short_tl = type5_short and bear_tl_in_hpa
 
@@ -390,7 +425,7 @@ if type1_short or (w_t1_short and pl_valid and close < last_pl_price * 0.995)
     w_t1_short := false
 
 // ============================================================
-// SECTION 8 — SL / TP  (C: TP obstacle check)
+// SECTION 8 — SL / TP + TP OBSTACLE (C)
 // ============================================================
 sl_offset = syminfo.mintick * sl_buffer_ticks
 
@@ -440,17 +475,15 @@ f_tp_obs_short(ep, tp) =>
         wh := (wh == "" ? "" : wh + "+") + "TL"
     [ob, wh]
 
-// Pre-compute for labels & alerts (avoids repeated calls)
-float _sl_l          = f_sl_long()
-float _sl_s          = f_sl_short()
-float _tp_l          = f_tp_long(close, _sl_l)
-float _tp_s          = f_tp_short(close, _sl_s)
-[obs_l, obs_l_what]  = f_tp_obs_long(close,  _tp_l)
-[obs_s, obs_s_what]  = f_tp_obs_short(close, _tp_s)
+float _sl_l         = f_sl_long()
+float _sl_s         = f_sl_short()
+float _tp_l         = f_tp_long(close, _sl_l)
+float _tp_s         = f_tp_short(close, _sl_s)
+[obs_l, obs_l_what] = f_tp_obs_long(close,  _tp_l)
+[obs_s, obs_s_what] = f_tp_obs_short(close, _tp_s)
 
 // ============================================================
 // SECTION 9 — SIGNAL STATISTICS (F)
-// Tracks a single active trade; counts TP/SL hits for win rate
 // ============================================================
 var int   stat_total = 0
 var int   stat_wins  = 0
@@ -459,7 +492,7 @@ var bool  trk_act    = false
 var float trk_ep     = na
 var float trk_sl     = na
 var float trk_tp     = na
-var int   trk_dir    = 0   // 1=long -1=short
+var int   trk_dir    = 0
 
 any_long  = type5_long  or type1_long
 any_short = type5_short or type1_short
@@ -481,17 +514,15 @@ if any_short and not trk_act
     stat_total += 1
 
 if trk_act and not na(trk_tp) and not na(trk_sl)
-    bool tp_hit  = trk_dir ==  1 ? high >= trk_tp : low  <= trk_tp
-    bool sl_hit  = trk_dir ==  1 ? low  <= trk_sl : high >= trk_sl
-    float r_ach  = trk_dir ==  1 ?
+    bool tp_hit = trk_dir ==  1 ? high >= trk_tp : low  <= trk_tp
+    bool sl_hit = trk_dir ==  1 ? low  <= trk_sl : high >= trk_sl
+    float r_ach = trk_dir ==  1 ?
          (trk_tp - trk_ep) / math.max(trk_ep - trk_sl, syminfo.mintick) :
          (trk_ep - trk_tp) / math.max(trk_sl - trk_ep, syminfo.mintick)
-
     if tp_hit
         stat_wins  += 1
         stat_sum_r += r_ach
         trk_act    := false
-
     if sl_hit and not tp_hit
         stat_sum_r -= 1.0
         trk_act    := false
@@ -519,7 +550,6 @@ if show_hpa and barstate.islast
 
 // ============================================================
 // SECTION 10.5 — DRAW: MTF REFERENCE BOXES (G)
-// Orange dashed = M15    Yellow dashed = H1
 // ============================================================
 var box m15_bull_box = na
 var box m15_bear_box = na
@@ -531,7 +561,6 @@ if show_mtf and barstate.islast
     box.delete(m15_bear_box)
     box.delete(h1_bull_box)
     box.delete(h1_bear_box)
-
     if not na(m15_bull_top) and not na(m15_bull_bot)
         m15_bull_box := box.new(bar_index - lookback_bars, m15_bull_top,
              bar_index + 10, m15_bull_bot,
@@ -576,9 +605,7 @@ if show_aoi and barstate.islast
              bgcolor=col_expansion, border_color=color.blue, border_width=1)
 
 // ============================================================
-// SECTION 12 — DRAW: AOI LINES + 1-1-1 TRENDLINES (B)
-// Pivot SNR lines (dashed), Exp 50% line (dotted),
-// TL solid when in HPA, dashed otherwise
+// SECTION 12 — DRAW: AOI LINES + 1-1-1 TRENDLINES
 // ============================================================
 var line aoi_ph_line  = na
 var line aoi_pl_line  = na
@@ -607,7 +634,6 @@ if show_aoi and barstate.islast
         exp50_line := line.new(bear_exp_start, bear_exp_50, bar_index + 20, bear_exp_50,
              color=color.new(color.blue, 30), width=2, style=line.style_dotted)
 
-    // Bull 1-1-1 TL from two swing lows
     if prev_pl_valid and pl_valid and last_pl_bar > prev_pl_bar
         float sl_b = (last_pl_price - prev_pl_price) / float(last_pl_bar - prev_pl_bar)
         float y_e  = last_pl_price + sl_b * float(bar_index + 20 - last_pl_bar)
@@ -615,7 +641,6 @@ if show_aoi and barstate.islast
              color=color.new(color.purple, 20), width=1,
              style = bull_tl_in_hpa ? line.style_solid : line.style_dashed)
 
-    // Bear 1-1-1 TL from two swing highs
     if prev_ph_valid and ph_valid and last_ph_bar > prev_ph_bar
         float sl_b = (last_ph_price - prev_ph_price) / float(last_ph_bar - prev_ph_bar)
         float y_e  = last_ph_price + sl_b * float(bar_index + 20 - last_ph_bar)
@@ -624,20 +649,20 @@ if show_aoi and barstate.islast
              style = bear_tl_in_hpa ? line.style_solid : line.style_dashed)
 
 // ============================================================
-// SECTION 13 — SIGNAL PLOTS & LABELS (C: obstacle warning)
+// SECTION 13 — SIGNAL PLOTS & LABELS
 // ============================================================
-plotshape(type5_long,     title="Type5 Long",     style=shape.triangleup,
-          location=location.belowbar, color=color.lime,                  size=size.normal)
-plotshape(type5_short,    title="Type5 Short",    style=shape.triangledown,
-          location=location.abovebar, color=color.red,                   size=size.normal)
-plotshape(type1_long,     title="Type1 Long",     style=shape.circle,
-          location=location.belowbar, color=color.green,                 size=size.small)
-plotshape(type1_short,    title="Type1 Short",    style=shape.circle,
-          location=location.abovebar, color=color.maroon,                size=size.small)
-plotshape(type5_long_tl,  title="T5+TL Long",     style=shape.diamond,
-          location=location.belowbar, color=color.new(color.purple, 0),  size=size.small)
-plotshape(type5_short_tl, title="T5+TL Short",    style=shape.diamond,
-          location=location.abovebar, color=color.new(color.purple, 0),  size=size.small)
+plotshape(type5_long,     title="Type5 Long",   style=shape.triangleup,
+          location=location.belowbar, color=color.lime,                 size=size.normal)
+plotshape(type5_short,    title="Type5 Short",  style=shape.triangledown,
+          location=location.abovebar, color=color.red,                  size=size.normal)
+plotshape(type1_long,     title="Type1 Long",   style=shape.circle,
+          location=location.belowbar, color=color.green,                size=size.small)
+plotshape(type1_short,    title="Type1 Short",  style=shape.circle,
+          location=location.abovebar, color=color.maroon,               size=size.small)
+plotshape(type5_long_tl,  title="T5+TL Long",   style=shape.diamond,
+          location=location.belowbar, color=color.new(color.purple, 0), size=size.small)
+plotshape(type5_short_tl, title="T5+TL Short",  style=shape.diamond,
+          location=location.abovebar, color=color.new(color.purple, 0), size=size.small)
 plotshape(bull_liq_grab and bull_in_hpa, title="Bull LG",
           style=shape.labelup,   location=location.belowbar,
           color=color.new(color.aqua, 30),   size=size.tiny, text="LG")
@@ -647,7 +672,7 @@ plotshape(bear_liq_grab and bear_in_hpa, title="Bear LG",
 
 if show_labels
     if type5_long
-        float rv  = (close - _sl_l) > 0 ? (_tp_l - close) / (close - _sl_l) : na
+        float rv = (close - _sl_l) > 0 ? (_tp_l - close) / (close - _sl_l) : na
         label.new(bar_index, low,
              text  = "T5 L\nSL:" + str.tostring(_sl_l, "#.##") +
                      "\nTP:" + str.tostring(_tp_l, "#.##") +
@@ -658,7 +683,7 @@ if show_labels
              textcolor=color.white, size=size.small)
 
     if type5_short
-        float rv  = (close - _sl_s) < 0 ? (close - _tp_s) / (_sl_s - close) : na
+        float rv = (_sl_s - close) > 0 ? (close - _tp_s) / (_sl_s - close) : na
         label.new(bar_index, high,
              text  = "T5 S\nSL:" + str.tostring(_sl_s, "#.##") +
                      "\nTP:" + str.tostring(_tp_s, "#.##") +
@@ -685,20 +710,20 @@ if show_labels
 // ============================================================
 // SECTION 14 — INFO TABLE (right)
 // ============================================================
-var table info_tbl = table.new(position.top_right, 2, 12,
+var table info_tbl = table.new(position.top_right, 2, 14,
      bgcolor=color.new(color.black, 70), border_width=1)
 
 if barstate.islast
-    table.cell(info_tbl, 0,  0, "SNR 3.0 v2",  text_color=color.white,  text_size=size.normal)
+    table.cell(info_tbl, 0,  0, "SNR 3.0 v3",  text_color=color.white,  text_size=size.normal)
     table.cell(info_tbl, 1,  0, syminfo.ticker, text_color=color.yellow, text_size=size.normal)
 
-    string mkt_str   = is_trend ? (bull_trend ? "Bull Trend" : "Bear Trend") : valid_range ? "Range" : "Unclear"
-    color  mkt_col   = is_trend ? (bull_trend ? color.lime   : color.red)    : valid_range ? color.orange : color.gray
+    string mkt_str = is_trend ? (bull_trend ? "Bull Trend" : "Bear Trend") : valid_range ? "Range" : "Unclear"
+    color  mkt_col = is_trend ? (bull_trend ? color.lime   : color.red)    : valid_range ? color.orange : color.gray
     table.cell(info_tbl, 0, 1, "Market",     text_color=color.gray)
     table.cell(info_tbl, 1, 1, mkt_str,      text_color=mkt_col)
 
-    string str_str   = hh_hl ? "HH-HL" : ll_lh ? "LL-LH" : "Unclear"
-    color  str_col   = hh_hl ? color.lime : ll_lh ? color.red : color.gray
+    string str_str = hh_hl ? "HH-HL" : ll_lh ? "LL-LH" : "Unclear"
+    color  str_col = hh_hl ? color.lime : ll_lh ? color.red : color.gray
     table.cell(info_tbl, 0, 2, "Structure",  text_color=color.gray)
     table.cell(info_tbl, 1, 2, str_str,      text_color=str_col)
 
@@ -710,34 +735,53 @@ if barstate.islast
     table.cell(info_tbl, 1, 4, in_session ? "ACTIVE" : "CLOSED",
          text_color = in_session ? color.lime : color.gray)
 
+    // Expansion quality breakdown
+    string bq_str = bull_exp_found ?
+         "Q " + str.tostring(bull_q_score) + "/3" +
+         (bq_s == 0 ? " !sz" : "") +
+         (bq_c == 0 ? " !ct" : "") +
+         (bq_m == 0 ? " !mo" : "") : "NO"
+    color  bq_col = bull_exp_found ? (bull_q_score == 3 ? color.lime : color.orange) : color.gray
     table.cell(info_tbl, 0, 5, "Bull Exp",   text_color=color.gray)
-    table.cell(info_tbl, 1, 5, bull_exp_found ? "YES" : "NO",
-         text_color = bull_exp_found ? color.lime : color.gray)
+    table.cell(info_tbl, 1, 5, bq_str,       text_color=bq_col)
 
+    string beq_str = bear_exp_found ?
+         "Q " + str.tostring(bear_q_score) + "/3" +
+         (beq_s == 0 ? " !sz" : "") +
+         (beq_c == 0 ? " !ct" : "") +
+         (beq_m == 0 ? " !mo" : "") : "NO"
+    color  beq_col = bear_exp_found ? (bear_q_score == 3 ? color.red : color.orange) : color.gray
     table.cell(info_tbl, 0, 6, "Bear Exp",   text_color=color.gray)
-    table.cell(info_tbl, 1, 6, bear_exp_found ? "YES" : "NO",
-         text_color = bear_exp_found ? color.red : color.gray)
+    table.cell(info_tbl, 1, 6, beq_str,      text_color=beq_col)
 
-    string tl_str    = bull_tl_in_hpa ? "BULL" : bear_tl_in_hpa ? "BEAR" : "—"
-    color  tl_col    = bull_tl_in_hpa ? color.lime : bear_tl_in_hpa ? color.red : color.gray
+    string tl_str = bull_tl_in_hpa ? "BULL" : bear_tl_in_hpa ? "BEAR" : "—"
+    color  tl_col = bull_tl_in_hpa ? color.lime : bear_tl_in_hpa ? color.red : color.gray
     table.cell(info_tbl, 0, 7, "TL in HPA",  text_color=color.gray)
     table.cell(info_tbl, 1, 7, tl_str,       text_color=tl_col)
 
-    table.cell(info_tbl, 0, 8, "DXY Long",   text_color=color.gray)
-    table.cell(info_tbl, 1, 8, dxy_confirm_long  ? "YES" : "NO",
+    table.cell(info_tbl, 0, 8, "In B.HPA",   text_color=color.gray)
+    table.cell(info_tbl, 1, 8, bull_in_hpa ? "YES" : "NO",
+         text_color = bull_in_hpa ? color.lime : color.gray)
+
+    table.cell(info_tbl, 0, 9, "In S.HPA",   text_color=color.gray)
+    table.cell(info_tbl, 1, 9, bear_in_hpa ? "YES" : "NO",
+         text_color = bear_in_hpa ? color.red : color.gray)
+
+    table.cell(info_tbl, 0, 10, "DXY Long",  text_color=color.gray)
+    table.cell(info_tbl, 1, 10, dxy_confirm_long  ? "YES" : "NO",
          text_color = dxy_confirm_long  ? color.lime : color.gray)
 
-    table.cell(info_tbl, 0, 9, "DXY Short",  text_color=color.gray)
-    table.cell(info_tbl, 1, 9, dxy_confirm_short ? "YES" : "NO",
+    table.cell(info_tbl, 0, 11, "DXY Short", text_color=color.gray)
+    table.cell(info_tbl, 1, 11, dxy_confirm_short ? "YES" : "NO",
          text_color = dxy_confirm_short ? color.red : color.gray)
 
-    string dxy_hpa_str = dxy_in_bear_hpa ? "Bear HPA" : dxy_in_bull_hpa ? "Bull HPA" : "—"
-    color  dxy_hpa_col = dxy_in_bear_hpa ? color.lime  : dxy_in_bull_hpa ? color.red  : color.gray
-    table.cell(info_tbl, 0, 10, "DXY Zone",  text_color=color.gray)
-    table.cell(info_tbl, 1, 10, dxy_hpa_str, text_color=dxy_hpa_col)
+    string dxy_z = dxy_in_bear_hpa ? "Bear HPA" : dxy_in_bull_hpa ? "Bull HPA" : "—"
+    color  dxy_c = dxy_in_bear_hpa ? color.lime  : dxy_in_bull_hpa ? color.red  : color.gray
+    table.cell(info_tbl, 0, 12, "DXY Zone",  text_color=color.gray)
+    table.cell(info_tbl, 1, 12, dxy_z,       text_color=dxy_c)
 
-    table.cell(info_tbl, 0, 11, "TP Block",  text_color=color.gray)
-    table.cell(info_tbl, 1, 11,
+    table.cell(info_tbl, 0, 13, "TP Block",  text_color=color.gray)
+    table.cell(info_tbl, 1, 13,
          (type5_long or type1_long)   and obs_l ? "⚠ " + obs_l_what :
          (type5_short or type1_short) and obs_s ? "⚠ " + obs_s_what : "—",
          text_color = (obs_l or obs_s) ? color.orange : color.gray)
@@ -749,17 +793,17 @@ var table stat_tbl = table.new(position.top_left, 2, 5,
      bgcolor=color.new(color.black, 70), border_width=1)
 
 if show_stats and barstate.islast
-    table.cell(stat_tbl, 0, 0, "Stats",      text_color=color.white, text_size=size.normal)
-    table.cell(stat_tbl, 1, 0, "",           text_color=color.white)
-    table.cell(stat_tbl, 0, 1, "Signals",    text_color=color.gray)
+    table.cell(stat_tbl, 0, 0, "Stats",   text_color=color.white, text_size=size.normal)
+    table.cell(stat_tbl, 1, 0, "",        text_color=color.white)
+    table.cell(stat_tbl, 0, 1, "Signals", text_color=color.gray)
     table.cell(stat_tbl, 1, 1, str.tostring(stat_total), text_color=color.white)
-    table.cell(stat_tbl, 0, 2, "Wins",       text_color=color.gray)
+    table.cell(stat_tbl, 0, 2, "Wins",    text_color=color.gray)
     table.cell(stat_tbl, 1, 2, str.tostring(stat_wins),  text_color=color.lime)
-    table.cell(stat_tbl, 0, 3, "Win %",      text_color=color.gray)
+    table.cell(stat_tbl, 0, 3, "Win %",   text_color=color.gray)
     table.cell(stat_tbl, 1, 3,
          not na(stat_winpct) ? str.tostring(stat_winpct, "#.#") + "%" : "—",
          text_color = not na(stat_winpct) and stat_winpct >= 50 ? color.lime : color.orange)
-    table.cell(stat_tbl, 0, 4, "Avg R",      text_color=color.gray)
+    table.cell(stat_tbl, 0, 4, "Avg R",   text_color=color.gray)
     table.cell(stat_tbl, 1, 4,
          not na(stat_avg_r) ? str.tostring(stat_avg_r, "#.##") : "—",
          text_color = not na(stat_avg_r) and stat_avg_r > 0 ? color.lime : color.red)
@@ -769,10 +813,10 @@ if show_stats and barstate.islast
 // ============================================================
 alertcondition(type5_long,
      title="SNR3 Type5 Long",
-     message="SNR 3.0 | T5 LONG | " + syminfo.ticker + " | HPA+Exp+DXY+Session OK")
+     message="SNR 3.0 | T5 LONG | " + syminfo.ticker + " | HPA+Exp(Q3)+DXY+Session OK")
 alertcondition(type5_short,
      title="SNR3 Type5 Short",
-     message="SNR 3.0 | T5 SHORT | " + syminfo.ticker + " | HPA+Exp+DXY+Session OK")
+     message="SNR 3.0 | T5 SHORT | " + syminfo.ticker + " | HPA+Exp(Q3)+DXY+Session OK")
 alertcondition(type5_long_tl,
      title="SNR3 Type5 Long + TL AOI",
      message="SNR 3.0 | T5 LONG + 1-1-1 TL | " + syminfo.ticker)
