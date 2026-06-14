@@ -1,5 +1,5 @@
 //@version=5
-indicator("SNR 3.0 HPA Reaction Model v4", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
+indicator("SNR 3.0 HPA Reaction Model v5", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
 
 // ============================================================
 // INPUT PARAMETERS
@@ -27,6 +27,7 @@ aoi_prox_ticks  = input.float(10, "AOI Proximity (ticks)",               minval=
 
 grp_dxy         = "DXY Confirmation"
 use_dxy         = input.bool(true,  "Enable DXY Filter",                 group=grp_dxy)
+dxy_symbol      = input.symbol("TVC:DXY", "DXY Symbol",                  group=grp_dxy)
 dxy_lookback    = input.int(10,   "DXY Reaction Lookback Bars",          minval=3,  maxval=50,  group=grp_dxy)
 dxy_sensitivity = input.float(0.15,"DXY Sensitivity % from Extreme",     minval=0.05,maxval=1.0,step=0.05,group=grp_dxy)
 
@@ -54,8 +55,9 @@ col_expansion   = input.color(color.new(color.blue,  70), "Expansion Color", gro
 
 // ============================================================
 // LOOKBACK BARS
+// Clamped to min 1 to avoid zero on H1+ timeframes
 // ============================================================
-bars_per_hour = math.round(60 / timeframe.multiplier)
+bars_per_hour = math.max(1, math.round(60 / timeframe.multiplier))
 lookback_bars = lookback_hrs * bars_per_hour
 
 // ============================================================
@@ -94,7 +96,6 @@ if not na(pl)
 
 // ============================================================
 // SECTION 1 — MARKET STATE
-// A0: time-limited pivots, swing threshold, no fallback
 // ============================================================
 window_high = ta.highest(high, lookback_bars)
 window_low  = ta.lowest(low,  lookback_bars)
@@ -120,7 +121,6 @@ bull_trend = hh_hl and not ll_lh
 bear_trend = ll_lh and not hh_hl
 is_trend   = bull_trend or bear_trend
 
-// A: Range midpoint crossing count (>=2 required for valid range)
 f_count_mid_crosses(midline, len) =>
     int cnt = 0
     int cap = math.min(len, 400)
@@ -270,7 +270,8 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
 
                     if ep_ok and size_ok and cont_ok and mom_ok
                         found      := true
-                        exp_start  := bar_index - lb
+                        // bar_index - (lb-1) is the oldest bar of the scanned segment
+                        exp_start  := bar_index - (lb - 1)
                         exp_end    := bar_index
                         exp_low_p  := seg_l
                         exp_high_p := seg_h
@@ -289,8 +290,8 @@ bull_q_score = bq_s + bq_c + bq_m
 bear_q_score = beq_s + beq_c + beq_m
 
 // ============================================================
-// SECTION 3.5 — 1-1-1 TRENDLINE AOI (B)
-// C: tl_in_hpa now also checks price proximity to trendline
+// SECTION 3.5 — 1-1-1 TRENDLINE AOI
+// in_hpa requires TL projection inside HPA AND price within proximity
 // ============================================================
 f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
     float tl_now = na
@@ -317,10 +318,12 @@ f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
 
 // ============================================================
 // SECTION 4 — LIQUIDITY GRAB DETECTION
+// ref_low/ref_high use [2] to EXCLUDE the spike bar itself ([1]),
+// ensuring spike = structural_level - spike_bar_low > 0 when grab occurs.
 // ============================================================
 f_liq_bull() =>
     bool  g       = false
-    float ref_low = ta.lowest(low[1], 20)
+    float ref_low = ta.lowest(low[2], 20)
     float spike   = ref_low - low[1]
     if spike >= liq_min_pts and spike <= liq_max_pts
         if close >= ref_low
@@ -333,7 +336,7 @@ f_liq_bull() =>
 
 f_liq_bear() =>
     bool  g        = false
-    float ref_high = ta.highest(high[1], 20)
+    float ref_high = ta.highest(high[2], 20)
     float spike    = high[1] - ref_high
     if spike >= liq_min_pts and spike <= liq_max_pts
         if close <= ref_high
@@ -349,12 +352,13 @@ bear_liq_grab = f_liq_bear()
 
 // ============================================================
 // SECTION 5 — DXY CONFIRMATION  (D: DXY own HPA)
+// Symbol defaults to TVC:DXY, user-configurable via input
 // ============================================================
-dxy_close = request.security("DXY", timeframe.period, close)
-dxy_high  = request.security("DXY", timeframe.period, high)
-dxy_low   = request.security("DXY", timeframe.period, low)
-dxy_wh    = request.security("DXY", timeframe.period, ta.highest(high, lookback_bars))
-dxy_wl    = request.security("DXY", timeframe.period, ta.lowest(low,   lookback_bars))
+dxy_close = request.security(dxy_symbol, timeframe.period, close)
+dxy_high  = request.security(dxy_symbol, timeframe.period, high)
+dxy_low   = request.security(dxy_symbol, timeframe.period, low)
+dxy_wh    = request.security(dxy_symbol, timeframe.period, ta.highest(high, lookback_bars))
+dxy_wl    = request.security(dxy_symbol, timeframe.period, ta.lowest(low,   lookback_bars))
 
 dxy_wrng         = not na(dxy_wh) and not na(dxy_wl) ? dxy_wh - dxy_wl : na
 dxy_bear_hpa_bot = not na(dxy_wh) and not na(dxy_wrng) ? dxy_wh - dxy_wrng * 0.25 : na
@@ -380,14 +384,9 @@ bear_in_hpa = not na(hpa_bear_bot) and not na(hpa_bear_top) and
               high >= hpa_bear_bot and low <= hpa_bear_top
 
 // ============================================================
-// SECTION 6.5 — AOI PROXIMITY DETECTION (A + C)
-//
-// Signals only fire when price is within aoi_prox_ticks of at
-// least one AOI source inside the active HPA zone:
-//   SNR  — last structural pivot level
-//   EXP50 — expansion leg 50% midpoint
-//   TL   — 1-1-1 trendline (already proximity-gated in f_tl111)
-//   LG   — liquidity grab event (spike + return)
+// SECTION 6.5 — AOI PROXIMITY DETECTION
+// Four AOI sources: SNR pivot, Exp50, 1-1-1 TL, Liquidity Grab
+// All checked within aoi_prox_ticks of current price.
 // ============================================================
 float aoi_buf = syminfo.mintick * aoi_prox_ticks
 
@@ -431,6 +430,8 @@ if bear_aoi_str == ""
 
 // ============================================================
 // SECTION 7 — ENTRY SIGNALS
+// Type 5: AOI touch required (price must be at a known AOI level)
+// Type 1: AOI touch NOT required; the BOS pullback point is itself AOI
 // ============================================================
 type5_long  = bull_in_hpa and bull_exp_found and dxy_confirm_long  and high[1] > high[2] and in_session and bull_aoi_touched
 type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and low[1]  < low[2]  and in_session and bear_aoi_touched
@@ -456,8 +457,8 @@ if bos_bear
     t1_short_e  := pl_valid and ph_valid ?
                    last_ph_price - (last_ph_price - last_pl_price) * 0.5 : na
 
-type1_long  = w_t1_long  and not na(t1_long_e)  and low  <= t1_long_e  and bull_in_hpa and dxy_confirm_long  and in_session and bull_aoi_touched
-type1_short = w_t1_short and not na(t1_short_e) and high >= t1_short_e and bear_in_hpa and dxy_confirm_short and in_session and bear_aoi_touched
+type1_long  = w_t1_long  and not na(t1_long_e)  and low  <= t1_long_e  and bull_in_hpa and dxy_confirm_long  and in_session
+type1_short = w_t1_short and not na(t1_short_e) and high >= t1_short_e and bear_in_hpa and dxy_confirm_short and in_session
 
 if type1_long  or (w_t1_long  and ph_valid and close > last_ph_price * 1.005)
     w_t1_long := false
@@ -465,7 +466,7 @@ if type1_short or (w_t1_short and pl_valid and close < last_pl_price * 0.995)
     w_t1_short := false
 
 // ============================================================
-// SECTION 8 — SL / TP + TP OBSTACLE (C)
+// SECTION 8 — SL / TP + TP OBSTACLE
 // ============================================================
 sl_offset = syminfo.mintick * sl_buffer_ticks
 
@@ -523,7 +524,7 @@ float _tp_s         = f_tp_short(close, _sl_s)
 [obs_s, obs_s_what] = f_tp_obs_short(close, _tp_s)
 
 // ============================================================
-// SECTION 9 — SIGNAL STATISTICS (F)
+// SECTION 9 — SIGNAL STATISTICS
 // ============================================================
 var int   stat_total = 0
 var int   stat_wins  = 0
@@ -589,7 +590,7 @@ if show_hpa and barstate.islast
              bgcolor=col_bear_hpa, border_color=color.red, border_width=1)
 
 // ============================================================
-// SECTION 10.5 — DRAW: MTF REFERENCE BOXES (G)
+// SECTION 10.5 — DRAW: MTF REFERENCE BOXES
 // ============================================================
 var box m15_bull_box = na
 var box m15_bear_box = na
@@ -735,14 +736,14 @@ if show_labels
 
     if type1_long
         label.new(bar_index, low,
-             text  = "T1 L [" + bull_aoi_str + "]\n@0.5 BOS" + (obs_l ? "\n⚠ " + obs_l_what : ""),
+             text  = "T1 L\n@0.5 BOS" + (obs_l ? "\n⚠ " + obs_l_what : ""),
              style=label.style_label_up,
              color=obs_l ? color.new(color.orange, 20) : color.new(color.teal, 20),
              textcolor=color.white, size=size.small)
 
     if type1_short
         label.new(bar_index, high,
-             text  = "T1 S [" + bear_aoi_str + "]\n@0.5 BOS" + (obs_s ? "\n⚠ " + obs_s_what : ""),
+             text  = "T1 S\n@0.5 BOS" + (obs_s ? "\n⚠ " + obs_s_what : ""),
              style=label.style_label_down,
              color=obs_s ? color.new(color.orange, 20) : color.new(color.purple, 20),
              textcolor=color.white, size=size.small)
@@ -754,7 +755,7 @@ var table info_tbl = table.new(position.top_right, 2, 16,
      bgcolor=color.new(color.black, 70), border_width=1)
 
 if barstate.islast
-    table.cell(info_tbl, 0,  0, "SNR 3.0 v4",  text_color=color.white,  text_size=size.normal)
+    table.cell(info_tbl, 0,  0, "SNR 3.0 v5",  text_color=color.white,  text_size=size.normal)
     table.cell(info_tbl, 1,  0, syminfo.ticker, text_color=color.yellow, text_size=size.normal)
 
     string mkt_str = is_trend ? (bull_trend ? "Bull Trend" : "Bear Trend") : valid_range ? "Range" : "Unclear"
@@ -793,7 +794,6 @@ if barstate.islast
     table.cell(info_tbl, 0, 6, "Bear Exp",   text_color=color.gray)
     table.cell(info_tbl, 1, 6, beq_str,      text_color=beq_col)
 
-    // rows 7-8: AOI sources currently active
     table.cell(info_tbl, 0, 7, "Bull AOI",   text_color=color.gray)
     table.cell(info_tbl, 1, 7, bull_aoi_str,
          text_color = bull_aoi_touched ? color.lime : color.gray)
@@ -829,7 +829,6 @@ if barstate.islast
          (type5_short or type1_short) and obs_s ? "⚠ " + obs_s_what : "—",
          text_color = (obs_l or obs_s) ? color.orange : color.gray)
 
-    // row 15: AOI proximity setting (reference)
     table.cell(info_tbl, 0, 15, "AOI Prox",  text_color=color.gray)
     table.cell(info_tbl, 1, 15, str.tostring(aoi_prox_ticks, "#") + " tk",
          text_color=color.gray)
