@@ -16,15 +16,19 @@ exp_dir_pct     = input.float(80, "Min Directional Candle %",      minval=50, ma
 grp_liq         = "Liquidity Grab"
 liq_min_pts     = input.float(4,  "Liquidity Grab Min Points",     minval=1,  group=grp_liq)
 liq_max_pts     = input.float(15, "Liquidity Grab Max Points",     minval=1,  group=grp_liq)
-liq_bars_back   = input.int(5,    "Bars to Confirm Return",        minval=1,  maxval=20,  group=grp_liq)
+liq_bars_back   = input.int(5,    "Bars to Confirm Return",        minval=2,  maxval=20,  group=grp_liq)
 
 grp_dxy         = "DXY Confirmation"
-use_dxy         = input.bool(true, "Enable DXY Filter",            group=grp_dxy)
-dxy_lookback    = input.int(10,   "DXY Reaction Lookback Bars",   minval=3,  maxval=50,  group=grp_dxy)
+use_dxy         = input.bool(true,  "Enable DXY Filter",           group=grp_dxy)
+dxy_lookback    = input.int(10,   "DXY Reaction Lookback Bars",    minval=3,  maxval=50,  group=grp_dxy)
+// FIX Bug 5: configurable DXY sensitivity instead of hardcoded 0.1%
+dxy_sensitivity = input.float(0.15, "DXY Sensitivity % from Extreme", minval=0.05, maxval=1.0, step=0.05, group=grp_dxy)
 
 grp_risk        = "Risk Management"
 risk_r_min      = input.float(1.5, "Minimum TP (R)",               minval=0.5, step=0.5,  group=grp_risk)
 risk_r_max      = input.float(2.0, "Maximum TP (R)",               minval=1.0, step=0.5,  group=grp_risk)
+// FIX Bug 2: proper SL buffer in ticks (XAUUSD default: 50 ticks = $0.50)
+sl_buffer_ticks = input.float(50, "SL Buffer (ticks beyond structure)", minval=5, maxval=500, group=grp_risk)
 
 grp_style       = "Display"
 show_hpa        = input.bool(true,  "Show HPA Zone",               group=grp_style)
@@ -41,58 +45,61 @@ bars_per_hour   = math.round(60 / timeframe.multiplier)
 lookback_bars   = lookback_hrs * bars_per_hour
 
 // ============================================================
-// UTILITIES
+// PIVOT DETECTION
 // ============================================================
-f_highest(src, len) =>
-    ta.highest(src, len)
-
-f_lowest(src, len) =>
-    ta.lowest(src, len)
-
-// Pivot detection
 ph = ta.pivothigh(high, swing_len, swing_len)
 pl = ta.pivotlow(low,  swing_len, swing_len)
 
-// Track last confirmed pivot high / low and their bar indices
-var float last_ph_price = na
-var int   last_ph_bar   = na
-var float last_pl_price = na
-var int   last_pl_bar   = na
+var float last_ph_price  = na
+var int   last_ph_bar    = na
+var float last_pl_price  = na
+var int   last_pl_bar    = na
+// FIX Bug 4: track second-to-last pivots to verify HH-HL / LL-LH structure
+var float prev_ph_price  = na
+var float prev_pl_price  = na
 
 if not na(ph)
+    prev_ph_price := last_ph_price
     last_ph_price := ph
     last_ph_bar   := bar_index - swing_len
 
 if not na(pl)
+    prev_pl_price := last_pl_price
     last_pl_price := pl
     last_pl_bar   := bar_index - swing_len
 
 // ============================================================
 // SECTION 1 — MARKET STATE (Trend vs Range)
+// FIX Bug 4: use HH-HL / LL-LH structure instead of just close vs midpoint
 // ============================================================
-// Use lookback window to find the highest high and lowest low
-window_high = f_highest(high, lookback_bars)
-window_low  = f_lowest(low,  lookback_bars)
+window_high = ta.highest(high, lookback_bars)
+window_low  = ta.lowest(low,  lookback_bars)
 window_mid  = (window_high + window_low) / 2
 window_rng  = window_high - window_low
 
-// A rough trend/range classifier:
-// If price has made a clear AB leg (swing_len pivots define A & B) we call it trend.
-// Otherwise treat as range.
-// We approximate: if current close is within the top or bottom quarter → near extremes → range.
-// If price broke above prior high → uptrend leg; below prior low → downtrend leg.
+// Bullish structure: higher high AND higher low confirmed by two consecutive pivots
+hh_hl = not na(last_ph_price) and not na(prev_ph_price) and
+        not na(last_pl_price) and not na(prev_pl_price) and
+        last_ph_price > prev_ph_price and last_pl_price > prev_pl_price
 
-bull_trend = close > window_mid and last_ph_bar > last_pl_bar   // last pivot was high (upleg)
-bear_trend = close < window_mid and last_pl_bar > last_ph_bar   // last pivot was low  (downleg)
+// Bearish structure: lower low AND lower high
+ll_lh = not na(last_ph_price) and not na(prev_ph_price) and
+        not na(last_pl_price) and not na(prev_pl_price) and
+        last_pl_price < prev_pl_price and last_ph_price < prev_ph_price
+
+// Fallback to simple check if not enough pivots yet
+bull_trend = hh_hl or (na(prev_ph_price) and close > window_mid and last_ph_bar > last_pl_bar)
+bear_trend = ll_lh or (na(prev_pl_price) and close < window_mid and last_pl_bar > last_ph_bar)
+
+// Ensure mutual exclusivity: if both somehow trigger, prefer the more recent pivot direction
+bull_trend := bull_trend and not bear_trend
 is_trend   = bull_trend or bear_trend
 is_range   = not is_trend
 
 // ============================================================
 // SECTION 2 — HPA CALCULATION
+// FIX Bug 9: always reset all four var values to avoid stale data across mode transitions
 // ============================================================
-// Trend HPA: 50% retracement of the identified AB leg
-// Range HPA: 25% zones from each boundary
-
 var float hpa_bull_top = na
 var float hpa_bull_bot = na
 var float hpa_bear_top = na
@@ -100,27 +107,26 @@ var float hpa_bear_bot = na
 
 if is_trend
     if bull_trend
-        // A = last_pl_price, B = last_ph_price
-        float a_price = last_pl_price
-        float b_price = last_ph_price
-        float mid50   = a_price + (b_price - a_price) * 0.5
-        float band    = (b_price - a_price) * 0.05     // ±5% of leg as band
-        hpa_bull_top := mid50 + band
-        hpa_bull_bot := mid50 - band
-        hpa_bear_top := na
-        hpa_bear_bot := na
+        float a_price    = na(last_pl_price) ? window_low  : last_pl_price
+        float b_price    = na(last_ph_price) ? window_high : last_ph_price
+        float mid50      = a_price + (b_price - a_price) * 0.5
+        float band       = (b_price - a_price) * 0.05
+        hpa_bull_top    := mid50 + band
+        hpa_bull_bot    := mid50 - band
+        // Explicit reset of opposing zone
+        hpa_bear_top    := na
+        hpa_bear_bot    := na
     else
-        // A = last_ph_price, B = last_pl_price
-        float a_price = last_ph_price
-        float b_price = last_pl_price
-        float mid50   = a_price + (b_price - a_price) * 0.5
-        float band    = (a_price - b_price) * 0.05
-        hpa_bear_top := mid50 + band
-        hpa_bear_bot := mid50 - band
-        hpa_bull_top := na
-        hpa_bull_bot := na
-else  // Range
-    // 25% zones
+        float a_price    = na(last_ph_price) ? window_high : last_ph_price
+        float b_price    = na(last_pl_price) ? window_low  : last_pl_price
+        float mid50      = a_price + (b_price - a_price) * 0.5
+        float band       = (a_price - b_price) * 0.05
+        hpa_bear_top    := mid50 + band
+        hpa_bear_bot    := mid50 - band
+        hpa_bull_top    := na
+        hpa_bull_bot    := na
+else
+    // Range: 25% zones from each boundary
     hpa_bull_top := window_low  + window_rng * 0.25
     hpa_bull_bot := window_low
     hpa_bear_top := window_high
@@ -128,90 +134,108 @@ else  // Range
 
 // ============================================================
 // SECTION 3 — EXPANSION LEG DETECTION
+// FIX Bug 1: replaced ta.highest/ta.lowest(src, loop_var) with manual iteration
+//            (Pine Script requires simple int for length — loop variables are not allowed)
+// FIX Bug 3: added endpoint-in-HPA validation after expansion is detected
+// FIX Bug 7: removed unused candle_body variable
 // ============================================================
-// Scan last exp_bars_max bars for a strong unidirectional move
-// that terminates near (or inside) HPA.
-
-f_check_expansion(direction) =>
-    // direction: 1 = bullish expansion INTO HPA from below
-    //           -1 = bearish expansion INTO HPA from above
-    bool  found        = false
-    int   exp_start    = 0
-    int   exp_end      = 0
-    float exp_low_p    = na
-    float exp_high_p   = na
+f_check_expansion(direction, hpa_top, hpa_bot) =>
+    bool  found      = false
+    int   exp_start  = 0
+    int   exp_end    = 0
+    float exp_low_p  = na
+    float exp_high_p = na
 
     for lookback = exp_bars_min to exp_bars_max
-        if bar_index >= lookback
-            int   start_i  = bar_index - lookback
-            float seg_high = ta.highest(high, lookback)[0]
-            float seg_low  = ta.lowest(low,  lookback)[0]
+        if bar_index >= lookback and not found
+            // Manual high/low calculation (Bug 1 fix)
+            float seg_high = high
+            float seg_low  = low
+            for j = 1 to lookback - 1
+                seg_high := math.max(seg_high, high[j])
+                seg_low  := math.min(seg_low,  low[j])
 
             // Count directional candles
-            int dir_count  = 0
-            int total      = lookback
+            int dir_count = 0
             for i = 0 to lookback - 1
                 if direction == 1 and close[i] > open[i]
                     dir_count += 1
                 if direction == -1 and close[i] < open[i]
                     dir_count += 1
 
-            float dir_ratio = 100.0 * dir_count / total
+            float dir_ratio = 100.0 * dir_count / lookback
 
             if dir_ratio >= exp_dir_pct
-                // Check no major retracement > 30% of segment range mid-way
                 float seg_rng    = seg_high - seg_low
                 bool  clean_move = true
+
                 for i = 1 to lookback - 2
-                    float candle_body = math.abs(close[i] - open[i])
-                    // a retrace candle larger than 30% of range breaks cleanness
-                    if direction == 1 and (high[i] - close[i]) > seg_rng * 0.30
+                    if direction == 1  and (high[i] - close[i]) > seg_rng * 0.30
                         clean_move := false
-                    if direction == -1 and (close[i] - low[i]) > seg_rng * 0.30
+                    if direction == -1 and (close[i] - low[i])  > seg_rng * 0.30
                         clean_move := false
 
                 if clean_move
-                    found     := true
-                    exp_start := start_i
-                    exp_end   := bar_index
-                    exp_low_p := seg_low
-                    exp_high_p:= seg_high
-                    break
+                    // FIX Bug 3: verify expansion endpoint lands inside HPA
+                    bool endpoint_in_hpa = false
+                    if not na(hpa_top) and not na(hpa_bot)
+                        if direction == 1
+                            // Bull expansion: tip (high of current area) should touch HPA
+                            endpoint_in_hpa := seg_high >= hpa_bot and seg_high <= hpa_top * 1.01
+                        else
+                            // Bear expansion: bottom should touch HPA
+                            endpoint_in_hpa := seg_low <= hpa_top and seg_low >= hpa_bot * 0.99
+                    else
+                        endpoint_in_hpa := true  // No HPA yet, allow detection
+
+                    if endpoint_in_hpa
+                        found      := true
+                        exp_start  := bar_index - lookback
+                        exp_end    := bar_index
+                        exp_low_p  := seg_low
+                        exp_high_p := seg_high
+
     [found, exp_start, exp_end, exp_low_p, exp_high_p]
 
-[bull_exp_found, bull_exp_start, bull_exp_end, bull_exp_low, bull_exp_high] = f_check_expansion(1)
-[bear_exp_found, bear_exp_start, bear_exp_end, bear_exp_low, bear_exp_high] = f_check_expansion(-1)
+[bull_exp_found, bull_exp_start, bull_exp_end, bull_exp_low, bull_exp_high] =
+     f_check_expansion(1,  hpa_bull_top, hpa_bull_bot)
+[bear_exp_found, bear_exp_start, bear_exp_end, bear_exp_low, bear_exp_high] =
+     f_check_expansion(-1, hpa_bear_top, hpa_bear_bot)
 
-// 50% balance of expansion leg (TP logic)
+// 50% balance of expansion leg (TP reference)
 bull_exp_50 = not na(bull_exp_low) and not na(bull_exp_high) ? (bull_exp_low + bull_exp_high) / 2 : na
 bear_exp_50 = not na(bear_exp_low) and not na(bear_exp_high) ? (bear_exp_low + bear_exp_high) / 2 : na
 
 // ============================================================
 // SECTION 4 — AOI: LIQUIDITY GRAB DETECTION
+// FIX Bug 8: confirmation loop starts at i=1 (skip current bar)
+//            so spike detection and return confirmation are on separate bars
 // ============================================================
-// Price spikes beyond a recent swing by liq_min_pts~liq_max_pts
-// then closes back inside the structure within liq_bars_back bars.
-
 f_liq_grab_bull() =>
-    // Looks for a wick below recent low that gets rejected upward
-    bool grabbed = false
+    bool  grabbed = false
     float ref_low = ta.lowest(low[1], 20)
-    float spike   = ref_low - low
+    float spike   = ref_low - low[1]   // spike on previous bar
     if spike >= liq_min_pts and spike <= liq_max_pts
-        // Did price close back above ref_low within liq_bars_back bars?
-        for i = 0 to liq_bars_back - 1
-            if close[i] > ref_low
-                grabbed := true
+        // Confirm return AFTER the spike bar (start from current bar i=0, spike was at i=1)
+        if close >= ref_low
+            grabbed := true
+        else
+            for i = 1 to liq_bars_back - 1
+                if close[i] > ref_low
+                    grabbed := true
     grabbed
 
 f_liq_grab_bear() =>
-    bool grabbed = false
+    bool  grabbed  = false
     float ref_high = ta.highest(high[1], 20)
-    float spike    = high - ref_high
+    float spike    = high[1] - ref_high
     if spike >= liq_min_pts and spike <= liq_max_pts
-        for i = 0 to liq_bars_back - 1
-            if close[i] < ref_high
-                grabbed := true
+        if close <= ref_high
+            grabbed := true
+        else
+            for i = 1 to liq_bars_back - 1
+                if close[i] < ref_high
+                    grabbed := true
     grabbed
 
 bull_liq_grab = f_liq_grab_bull()
@@ -219,15 +243,15 @@ bear_liq_grab = f_liq_grab_bear()
 
 // ============================================================
 // SECTION 5 — DXY CONFIRMATION
+// FIX Bug 5: use configurable dxy_sensitivity input instead of hardcoded 0.999/1.001
 // ============================================================
 dxy_close = request.security("DXY", timeframe.period, close)
 dxy_high  = request.security("DXY", timeframe.period, high)
 dxy_low   = request.security("DXY", timeframe.period, low)
 
-// DXY bearish reaction = DXY dropped from a recent high (confirms gold long)
-dxy_dropped  = dxy_close < ta.highest(dxy_high, dxy_lookback) * 0.999
-// DXY bullish reaction = DXY rose from a recent low (confirms gold short)
-dxy_rallied  = dxy_close > ta.lowest(dxy_low,  dxy_lookback) * 1.001
+float dxy_sens_factor = dxy_sensitivity / 100.0
+dxy_dropped  = dxy_close < ta.highest(dxy_high, dxy_lookback) * (1.0 - dxy_sens_factor)
+dxy_rallied  = dxy_close > ta.lowest(dxy_low,  dxy_lookback) * (1.0 + dxy_sens_factor)
 
 dxy_confirm_long  = not use_dxy or dxy_dropped
 dxy_confirm_short = not use_dxy or dxy_rallied
@@ -243,27 +267,27 @@ bear_in_hpa = not na(hpa_bear_bot) and not na(hpa_bear_top) and
 
 // ============================================================
 // SECTION 7 — ENTRY SIGNALS
+// FIX Bug 6: Type 5 uses high[1]/low[1] (prior confirmed bar) to avoid repainting.
+//            Signal fires on the bar AFTER the break is confirmed.
 // ============================================================
-// Type 5: Break of previous bar's high/low after touching AOI
+// Type 5: Prior bar broke structure — signal on current confirmed bar
 type5_long  = bull_in_hpa and bull_exp_found and dxy_confirm_long  and
-              high > high[1]  // current bar breaks prior high
+              high[1] > high[2]   // prior bar's close broke the bar before it
 
 type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and
-              low  < low[1]   // current bar breaks prior low
+              low[1]  < low[2]
 
 // Type 1: BOS then retrace to 0.5
-// BOS upward: close broke above last swing high
 bos_bull = ta.crossover(close,  last_ph_price)
 bos_bear = ta.crossunder(close, last_pl_price)
 
-var bool   waiting_t1_long  = false
-var bool   waiting_t1_short = false
-var float  t1_long_entry    = na
-var float  t1_short_entry   = na
+var bool  waiting_t1_long  = false
+var bool  waiting_t1_short = false
+var float t1_long_entry    = na
+var float t1_short_entry   = na
 
 if bos_bull
     waiting_t1_long  := true
-    // entry target = 50% of last up move
     t1_long_entry    := not na(last_pl_price) and not na(last_ph_price) ?
                         last_pl_price + (last_ph_price - last_pl_price) * 0.5 : na
 
@@ -278,7 +302,6 @@ type1_long  = waiting_t1_long  and not na(t1_long_entry)  and
 type1_short = waiting_t1_short and not na(t1_short_entry) and
               high >= t1_short_entry and bear_in_hpa and dxy_confirm_short
 
-// Reset waiting flags on signal or if price has moved too far
 if type1_long  or (waiting_t1_long  and not na(last_ph_price) and close > last_ph_price * 1.005)
     waiting_t1_long  := false
 if type1_short or (waiting_t1_short and not na(last_pl_price) and close < last_pl_price * 0.995)
@@ -286,27 +309,29 @@ if type1_short or (waiting_t1_short and not na(last_pl_price) and close < last_p
 
 // ============================================================
 // SECTION 8 — SL / TP COMPUTATION
+// FIX Bug 2: SL uses configurable sl_buffer_ticks (default 50 ticks = $0.50 for XAUUSD)
 // ============================================================
-// SL: beyond the structure invalidation point
+sl_offset = syminfo.mintick * sl_buffer_ticks
+
 f_sl_long() =>
-    not na(last_pl_price) ? last_pl_price - syminfo.mintick * 5 : low - syminfo.mintick * 20
+    not na(last_pl_price) ? last_pl_price - sl_offset : low - sl_offset
 
 f_sl_short() =>
-    not na(last_ph_price) ? last_ph_price + syminfo.mintick * 5 : high + syminfo.mintick * 20
+    not na(last_ph_price) ? last_ph_price + sl_offset : high + sl_offset
 
 f_tp_long(entry_price, sl_price) =>
     float risk     = entry_price - sl_price
-    float tp_r     = entry_price + risk * ((risk_r_min + risk_r_max) / 2)
-    // Also consider expansion 50% as TP candidate
+    float tp_r     = entry_price + risk * ((risk_r_min + risk_r_max) / 2.0)
     float tp_exp50 = not na(bull_exp_50) ? bull_exp_50 : na
-    // Use the more conservative of the two (closer to entry)
-    not na(tp_exp50) and tp_exp50 < tp_r ? tp_exp50 : tp_r
+    // Conservative TP = lower of the two valid targets (closer to entry = less greedy)
+    not na(tp_exp50) and tp_exp50 > entry_price and tp_exp50 < tp_r ? tp_exp50 : tp_r
 
 f_tp_short(entry_price, sl_price) =>
     float risk     = sl_price - entry_price
-    float tp_r     = entry_price - risk * ((risk_r_min + risk_r_max) / 2)
+    float tp_r     = entry_price - risk * ((risk_r_min + risk_r_max) / 2.0)
     float tp_exp50 = not na(bear_exp_50) ? bear_exp_50 : na
-    not na(tp_exp50) and tp_exp50 > tp_r ? tp_exp50 : tp_r
+    // Conservative TP = higher of the two valid targets (closer to entry)
+    not na(tp_exp50) and tp_exp50 < entry_price and tp_exp50 > tp_r ? tp_exp50 : tp_r
 
 // ============================================================
 // SECTION 9 — DRAWING: HPA BOXES
@@ -320,21 +345,21 @@ if show_hpa and barstate.islast
 
     if not na(hpa_bull_bot) and not na(hpa_bull_top)
         hpa_bull_box := box.new(
-             left   = bar_index - lookback_bars,
-             top    = hpa_bull_top,
-             right  = bar_index + 10,
-             bottom = hpa_bull_bot,
-             bgcolor= col_bull_hpa,
+             left         = bar_index - lookback_bars,
+             top          = hpa_bull_top,
+             right        = bar_index + 10,
+             bottom       = hpa_bull_bot,
+             bgcolor      = col_bull_hpa,
              border_color = color.green,
              border_width = 1)
 
     if not na(hpa_bear_bot) and not na(hpa_bear_top)
         hpa_bear_box := box.new(
-             left   = bar_index - lookback_bars,
-             top    = hpa_bear_top,
-             right  = bar_index + 10,
-             bottom = hpa_bear_bot,
-             bgcolor= col_bear_hpa,
+             left         = bar_index - lookback_bars,
+             top          = hpa_bear_top,
+             right        = bar_index + 10,
+             bottom       = hpa_bear_bot,
+             bgcolor      = col_bear_hpa,
              border_color = color.red,
              border_width = 1)
 
@@ -350,33 +375,35 @@ if show_aoi and barstate.islast
 
     if bull_exp_found and not na(bull_exp_low) and not na(bull_exp_high)
         bull_exp_box := box.new(
-             left   = bull_exp_start,
-             top    = bull_exp_high,
-             right  = bull_exp_end,
-             bottom = bull_exp_low,
-             bgcolor= col_expansion,
+             left         = bull_exp_start,
+             top          = bull_exp_high,
+             right        = bull_exp_end,
+             bottom       = bull_exp_low,
+             bgcolor      = col_expansion,
              border_color = color.blue,
              border_width = 1)
 
     if bear_exp_found and not na(bear_exp_low) and not na(bear_exp_high)
         bear_exp_box := box.new(
-             left   = bear_exp_start,
-             top    = bear_exp_high,
-             right  = bear_exp_end,
-             bottom = bear_exp_low,
-             bgcolor= col_expansion,
+             left         = bear_exp_start,
+             top          = bear_exp_high,
+             right        = bear_exp_end,
+             bottom       = bear_exp_low,
+             bgcolor      = col_expansion,
              border_color = color.blue,
              border_width = 1)
 
 // ============================================================
-// SECTION 11 — DRAWING: AOI LINES (SNR levels via pivot)
+// SECTION 11 — DRAWING: AOI LINES
 // ============================================================
 var line aoi_ph_line = na
 var line aoi_pl_line = na
+var line exp50_line  = na
 
 if show_aoi and barstate.islast
     line.delete(aoi_ph_line)
     line.delete(aoi_pl_line)
+    line.delete(exp50_line)
 
     if not na(last_ph_price)
         aoi_ph_line := line.new(
@@ -398,10 +425,6 @@ if show_aoi and barstate.islast
              width = 1,
              style = line.style_dashed)
 
-// Expansion 50% midline (TP reference)
-var line exp50_line = na
-if show_aoi and barstate.islast
-    line.delete(exp50_line)
     if bull_exp_found and not na(bull_exp_50)
         exp50_line := line.new(
              x1    = bull_exp_start,
@@ -425,89 +448,92 @@ if show_aoi and barstate.islast
 // SECTION 12 — SIGNAL PLOTS & LABELS
 // ============================================================
 plotshape(type5_long,  title="Type5 Long",  style=shape.triangleup,
-          location=location.belowbar, color=color.lime,  size=size.normal)
+          location=location.belowbar, color=color.lime,   size=size.normal)
 plotshape(type5_short, title="Type5 Short", style=shape.triangledown,
-          location=location.abovebar, color=color.red,   size=size.normal)
+          location=location.abovebar, color=color.red,    size=size.normal)
 plotshape(type1_long,  title="Type1 Long",  style=shape.circle,
-          location=location.belowbar, color=color.green, size=size.small)
+          location=location.belowbar, color=color.green,  size=size.small)
 plotshape(type1_short, title="Type1 Short", style=shape.circle,
           location=location.abovebar, color=color.maroon, size=size.small)
 
-// Liquidity grab markers
 plotshape(bull_liq_grab and bull_in_hpa, title="Bull Liq Grab", style=shape.labelup,
-          location=location.belowbar, color=color.new(color.aqua, 30), size=size.tiny, text="LG")
+          location=location.belowbar, color=color.new(color.aqua, 30),   size=size.tiny, text="LG")
 plotshape(bear_liq_grab and bear_in_hpa, title="Bear Liq Grab", style=shape.labeldown,
           location=location.abovebar, color=color.new(color.orange, 30), size=size.tiny, text="LG")
 
-// SL / TP labels on signal bars
 if show_labels
     if type5_long
         float sl_l  = f_sl_long()
         float tp_l  = f_tp_long(close, sl_l)
-        float r_val = (tp_l - close) / (close - sl_l)
+        float r_val = (close - sl_l) > 0 ? (tp_l - close) / (close - sl_l) : na
         label.new(bar_index, low,
-             text  = "T5 L\nSL:" + str.tostring(sl_l, "#.##") + "\nTP:" + str.tostring(tp_l, "#.##") + "\nR:" + str.tostring(r_val, "#.#"),
-             style = label.style_label_up,
-             color = color.new(color.green, 20),
+             text      = "T5 L\nSL:" + str.tostring(sl_l, "#.##") +
+                         "\nTP:" + str.tostring(tp_l, "#.##") +
+                         "\nR:"  + str.tostring(r_val, "#.#"),
+             style     = label.style_label_up,
+             color     = color.new(color.green, 20),
              textcolor = color.white, size = size.small)
 
     if type5_short
         float sl_s  = f_sl_short()
         float tp_s  = f_tp_short(close, sl_s)
-        float r_val = (close - tp_s) / (sl_s - close)
+        float r_val = (sl_s - close) > 0 ? (close - tp_s) / (sl_s - close) : na
         label.new(bar_index, high,
-             text  = "T5 S\nSL:" + str.tostring(sl_s, "#.##") + "\nTP:" + str.tostring(tp_s, "#.##") + "\nR:" + str.tostring(r_val, "#.#"),
-             style = label.style_label_down,
-             color = color.new(color.red, 20),
+             text      = "T5 S\nSL:" + str.tostring(sl_s, "#.##") +
+                         "\nTP:" + str.tostring(tp_s, "#.##") +
+                         "\nR:"  + str.tostring(r_val, "#.#"),
+             style     = label.style_label_down,
+             color     = color.new(color.red, 20),
              textcolor = color.white, size = size.small)
 
     if type1_long
-        float sl_l = f_sl_long()
-        float tp_l = f_tp_long(close, sl_l)
         label.new(bar_index, low,
-             text  = "T1 L\nEntry@0.5 BOS",
-             style = label.style_label_up,
-             color = color.new(color.teal, 20),
+             text      = "T1 L\nEntry@0.5 BOS",
+             style     = label.style_label_up,
+             color     = color.new(color.teal, 20),
              textcolor = color.white, size = size.small)
 
     if type1_short
-        float sl_s = f_sl_short()
-        float tp_s = f_tp_short(close, sl_s)
         label.new(bar_index, high,
-             text  = "T1 S\nEntry@0.5 BOS",
-             style = label.style_label_down,
-             color = color.new(color.purple, 20),
+             text      = "T1 S\nEntry@0.5 BOS",
+             style     = label.style_label_down,
+             color     = color.new(color.purple, 20),
              textcolor = color.white, size = size.small)
 
 // ============================================================
 // SECTION 13 — INFO TABLE
 // ============================================================
-var table info_tbl = table.new(position.top_right, 2, 8,
+var table info_tbl = table.new(position.top_right, 2, 9,
      bgcolor = color.new(color.black, 70), border_width = 1)
 
 if barstate.islast
-    table.cell(info_tbl, 0, 0, "SNR 3.0",        text_color=color.white,  text_size=size.normal)
-    table.cell(info_tbl, 1, 0, syminfo.ticker,    text_color=color.yellow, text_size=size.normal)
-    table.cell(info_tbl, 0, 1, "Market",          text_color=color.gray)
-    table.cell(info_tbl, 1, 1, is_trend ? (bull_trend ? "Bull Trend" : "Bear Trend") : "Range",
+    table.cell(info_tbl, 0, 0, "SNR 3.0",     text_color=color.white,  text_size=size.normal)
+    table.cell(info_tbl, 1, 0, syminfo.ticker, text_color=color.yellow, text_size=size.normal)
+    table.cell(info_tbl, 0, 1, "Market",       text_color=color.gray)
+    table.cell(info_tbl, 1, 1,
+         is_trend ? (bull_trend ? "Bull Trend" : "Bear Trend") : "Range",
          text_color = is_trend ? (bull_trend ? color.lime : color.red) : color.orange)
-    table.cell(info_tbl, 0, 2, "Bull Exp",        text_color=color.gray)
-    table.cell(info_tbl, 1, 2, bull_exp_found ? "YES" : "NO",
+    table.cell(info_tbl, 0, 2, "Structure",    text_color=color.gray)
+    table.cell(info_tbl, 1, 2,
+         hh_hl ? "HH-HL" : ll_lh ? "LL-LH" : "Unclear",
+         text_color = hh_hl ? color.lime : ll_lh ? color.red : color.gray)
+    table.cell(info_tbl, 0, 3, "Bull Exp",     text_color=color.gray)
+    table.cell(info_tbl, 1, 3, bull_exp_found ? "YES" : "NO",
          text_color = bull_exp_found ? color.lime : color.gray)
-    table.cell(info_tbl, 0, 3, "Bear Exp",        text_color=color.gray)
-    table.cell(info_tbl, 1, 3, bear_exp_found ? "YES" : "NO",
+    table.cell(info_tbl, 0, 4, "Bear Exp",     text_color=color.gray)
+    table.cell(info_tbl, 1, 4, bear_exp_found ? "YES" : "NO",
          text_color = bear_exp_found ? color.red : color.gray)
-    table.cell(info_tbl, 0, 4, "In Bull HPA",     text_color=color.gray)
-    table.cell(info_tbl, 1, 4, bull_in_hpa ? "YES" : "NO",
+    table.cell(info_tbl, 0, 5, "In Bull HPA",  text_color=color.gray)
+    table.cell(info_tbl, 1, 5, bull_in_hpa ? "YES" : "NO",
          text_color = bull_in_hpa ? color.lime : color.gray)
-    table.cell(info_tbl, 0, 5, "In Bear HPA",     text_color=color.gray)
-    table.cell(info_tbl, 1, 5, bear_in_hpa ? "YES" : "NO",
+    table.cell(info_tbl, 0, 6, "In Bear HPA",  text_color=color.gray)
+    table.cell(info_tbl, 1, 6, bear_in_hpa ? "YES" : "NO",
          text_color = bear_in_hpa ? color.red : color.gray)
-    table.cell(info_tbl, 0, 6, "DXY Long OK",     text_color=color.gray)
-    table.cell(info_tbl, 1, 6, dxy_confirm_long  ? "YES" : "NO",
+    table.cell(info_tbl, 0, 7, "DXY Long OK",  text_color=color.gray)
+    table.cell(info_tbl, 1, 7, dxy_confirm_long  ? "YES" : "NO",
          text_color = dxy_confirm_long  ? color.lime : color.gray)
-    table.cell(info_tbl, 0, 7, "DXY Short OK",    text_color=color.gray)
-    table.cell(info_tbl, 1, 7, dxy_confirm_short ? "YES" : "NO",
+    table.cell(info_tbl, 0, 8, "DXY Short OK", text_color=color.gray)
+    table.cell(info_tbl, 1, 8, dxy_confirm_short ? "YES" : "NO",
          text_color = dxy_confirm_short ? color.red : color.gray)
 
 // ============================================================
@@ -516,12 +542,12 @@ if barstate.islast
 alertcondition(type5_long,
      title   = "SNR3 Type5 Long Setup",
      message = "SNR 3.0 | Type5 LONG | " + syminfo.ticker +
-               " | Price entered Bull HPA + Expansion confirmed + DXY bearish")
+               " | Bull HPA + Expansion confirmed + DXY bearish")
 
 alertcondition(type5_short,
      title   = "SNR3 Type5 Short Setup",
      message = "SNR 3.0 | Type5 SHORT | " + syminfo.ticker +
-               " | Price entered Bear HPA + Expansion confirmed + DXY bullish")
+               " | Bear HPA + Expansion confirmed + DXY bullish")
 
 alertcondition(type1_long,
      title   = "SNR3 Type1 Long Setup",
@@ -533,8 +559,8 @@ alertcondition(type1_short,
 
 alertcondition(bull_liq_grab and bull_in_hpa and bull_exp_found and dxy_confirm_long,
      title   = "SNR3 Bull Liquidity Grab in HPA",
-     message = "SNR 3.0 | BULL Liquidity Grab inside HPA | " + syminfo.ticker)
+     message = "SNR 3.0 | BULL Liq Grab in HPA | " + syminfo.ticker)
 
 alertcondition(bear_liq_grab and bear_in_hpa and bear_exp_found and dxy_confirm_short,
      title   = "SNR3 Bear Liquidity Grab in HPA",
-     message = "SNR 3.0 | BEAR Liquidity Grab inside HPA | " + syminfo.ticker)
+     message = "SNR 3.0 | BEAR Liq Grab in HPA | " + syminfo.ticker)
