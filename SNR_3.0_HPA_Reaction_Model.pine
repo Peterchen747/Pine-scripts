@@ -1,5 +1,5 @@
 //@version=5
-indicator("SNR 3.0 HPA Reaction Model v3", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
+indicator("SNR 3.0 HPA Reaction Model v4", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
 
 // ============================================================
 // INPUT PARAMETERS
@@ -13,7 +13,6 @@ grp_expansion   = "Expansion Leg"
 exp_bars_min    = input.int(15,   "Min Bars for Expansion",              minval=5,  maxval=60,  group=grp_expansion)
 exp_bars_max    = input.int(30,   "Max Bars for Expansion",              minval=10, maxval=120, group=grp_expansion)
 exp_dir_pct     = input.float(80, "Min Directional Candle %",            minval=50, maxval=100, group=grp_expansion)
-// Quality filters
 exp_min_ticks   = input.float(150,"Min Leg Size (ticks)",                minval=10, maxval=2000,group=grp_expansion)
 exp_continuity  = input.float(40, "Min Continuity % (no bar overlap)",   minval=0,  maxval=100, group=grp_expansion)
 exp_momentum    = input.float(60, "Min Momentum % (close top/bot half)", minval=0,  maxval=100, group=grp_expansion)
@@ -22,6 +21,9 @@ grp_liq         = "Liquidity Grab"
 liq_min_pts     = input.float(4,  "Liquidity Grab Min Points",           minval=1,  group=grp_liq)
 liq_max_pts     = input.float(15, "Liquidity Grab Max Points",           minval=1,  group=grp_liq)
 liq_bars_back   = input.int(5,    "Bars to Confirm Return",              minval=2,  maxval=20,  group=grp_liq)
+
+grp_aoi         = "AOI Detection"
+aoi_prox_ticks  = input.float(10, "AOI Proximity (ticks)",               minval=2,  maxval=200, step=5, group=grp_aoi)
 
 grp_dxy         = "DXY Confirmation"
 use_dxy         = input.bool(true,  "Enable DXY Filter",                 group=grp_dxy)
@@ -118,7 +120,7 @@ bull_trend = hh_hl and not ll_lh
 bear_trend = ll_lh and not hh_hl
 is_trend   = bull_trend or bear_trend
 
-// A: Range midpoint crossing count (≥2 required for valid range)
+// A: Range midpoint crossing count (>=2 required for valid range)
 f_count_mid_crosses(midline, len) =>
     int cnt = 0
     int cap = math.min(len, 400)
@@ -198,12 +200,6 @@ h1_bear_bot  = not na(h1_wh)  and not na(h1_rng)  ? h1_wh  - h1_rng  * 0.25 : na
 
 // ============================================================
 // SECTION 3 — EXPANSION LEG DETECTION  (v3: quality scoring)
-//
-// Quality 1 — Size:        total leg range >= exp_min_ticks
-// Quality 2 — Continuity:  % of bars where open does not overlap
-//                          previous bar's close (non-retracing bars)
-// Quality 3 — Momentum:    % of directional bars where close is
-//                          in the favorable half of the bar range
 // ============================================================
 f_check_expansion(direction, hpa_top, hpa_bot) =>
     bool  found      = false
@@ -211,21 +207,18 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
     int   exp_end    = 0
     float exp_low_p  = na
     float exp_high_p = na
-    // Quality scores exported for the last checked segment
-    int   q_size     = 0    // 1 if size ok
-    int   q_cont     = 0    // 1 if continuity ok
-    int   q_mom      = 0    // 1 if momentum ok
+    int   q_size     = 0
+    int   q_cont     = 0
+    int   q_mom      = 0
 
     for lb = exp_bars_min to exp_bars_max
         if bar_index >= lb and not found
-            // Manual high/low (avoids ta.highest with loop variable)
             float seg_h = high
             float seg_l = low
             for j = 1 to lb - 1
                 seg_h := math.max(seg_h, high[j])
                 seg_l := math.min(seg_l, low[j])
 
-            // Direction ratio
             int dir_cnt = 0
             for i = 0 to lb - 1
                 if direction ==  1 and close[i] > open[i]
@@ -236,7 +229,6 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
             if 100.0 * dir_cnt / lb >= exp_dir_pct
                 float seg_rng = seg_h - seg_l
 
-                // Existing cleanness check (no large opposing wick)
                 bool clean = true
                 for i = 1 to lb - 2
                     if direction ==  1 and (high[i]  - close[i]) > seg_rng * 0.30
@@ -245,10 +237,8 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
                         clean := false
 
                 if clean
-                    // ── Quality 1: minimum leg size ──────────────────
                     bool size_ok = seg_rng >= syminfo.mintick * exp_min_ticks
 
-                    // ── Quality 2: continuity (non-overlapping bars) ──
                     int cont_cnt = 0
                     for i = 0 to lb - 2
                         if direction ==  1 and open[i] >= close[i + 1]
@@ -257,7 +247,6 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
                             cont_cnt += 1
                     bool cont_ok = 100.0 * cont_cnt / math.max(lb - 1, 1) >= exp_continuity
 
-                    // ── Quality 3: momentum (close in favorable half) ─
                     int mom_cnt = 0
                     for i = 0 to lb - 1
                         float br = math.max(high[i] - low[i], syminfo.mintick)
@@ -267,7 +256,6 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
                             mom_cnt += 1
                     bool mom_ok = dir_cnt > 0 and 100.0 * mom_cnt / dir_cnt >= exp_momentum
 
-                    // ── Endpoint in HPA ───────────────────────────────
                     bool ep_ok = false
                     if not na(hpa_top) and not na(hpa_bot)
                         ep_ok := direction ==  1 ?
@@ -276,7 +264,6 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
                     else
                         ep_ok := true
 
-                    // Export quality scores (for info table)
                     q_size := size_ok ? 1 : 0
                     q_cont := cont_ok ? 1 : 0
                     q_mom  := mom_ok  ? 1 : 0
@@ -298,12 +285,12 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
 bull_exp_50 = not na(bull_exp_low) and not na(bull_exp_high) ? (bull_exp_low  + bull_exp_high) / 2 : na
 bear_exp_50 = not na(bear_exp_low) and not na(bear_exp_high) ? (bear_exp_low  + bear_exp_high) / 2 : na
 
-// Quality label for info table
 bull_q_score = bq_s + bq_c + bq_m
 bear_q_score = beq_s + beq_c + beq_m
 
 // ============================================================
 // SECTION 3.5 — 1-1-1 TRENDLINE AOI (B)
+// C: tl_in_hpa now also checks price proximity to trendline
 // ============================================================
 f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
     float tl_now = na
@@ -312,7 +299,10 @@ f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
         float slope = (y2 - y1) / float(x2 - x1)
         tl_now     := y2 + slope * float(bar_index - x2)
         if not na(hpa_top) and not na(hpa_bot)
-            in_hpa := tl_now >= hpa_bot and tl_now <= hpa_top
+            float prox    = syminfo.mintick * aoi_prox_ticks
+            bool  in_zone = tl_now >= hpa_bot and tl_now <= hpa_top
+            bool  near    = high >= tl_now - prox and low <= tl_now + prox
+            in_hpa := in_zone and near
     [tl_now, in_hpa]
 
 [bull_tl_val, bull_tl_in_hpa] = f_tl111(
@@ -390,10 +380,60 @@ bear_in_hpa = not na(hpa_bear_bot) and not na(hpa_bear_top) and
               high >= hpa_bear_bot and low <= hpa_bear_top
 
 // ============================================================
+// SECTION 6.5 — AOI PROXIMITY DETECTION (A + C)
+//
+// Signals only fire when price is within aoi_prox_ticks of at
+// least one AOI source inside the active HPA zone:
+//   SNR  — last structural pivot level
+//   EXP50 — expansion leg 50% midpoint
+//   TL   — 1-1-1 trendline (already proximity-gated in f_tl111)
+//   LG   — liquidity grab event (spike + return)
+// ============================================================
+float aoi_buf = syminfo.mintick * aoi_prox_ticks
+
+bool bull_at_snr = pl_valid and not na(last_pl_price) and
+                   high >= last_pl_price - aoi_buf and low <= last_pl_price + aoi_buf
+bool bull_at_exp = bull_exp_found and not na(bull_exp_50) and
+                   high >= bull_exp_50 - aoi_buf and low <= bull_exp_50 + aoi_buf
+bool bull_aoi_touched = bull_in_hpa and (bull_at_snr or bull_at_exp or bull_tl_in_hpa or (bull_liq_grab and bull_in_hpa))
+
+bool bear_at_snr = ph_valid and not na(last_ph_price) and
+                   high >= last_ph_price - aoi_buf and low <= last_ph_price + aoi_buf
+bool bear_at_exp = bear_exp_found and not na(bear_exp_50) and
+                   high >= bear_exp_50 - aoi_buf and low <= bear_exp_50 + aoi_buf
+bool bear_aoi_touched = bear_in_hpa and (bear_at_snr or bear_at_exp or bear_tl_in_hpa or (bear_liq_grab and bear_in_hpa))
+
+string bull_aoi_str = ""
+if bull_aoi_touched
+    if bull_at_snr
+        bull_aoi_str := "SNR"
+    if bull_at_exp
+        bull_aoi_str := bull_aoi_str == "" ? "EXP50" : bull_aoi_str + "+EXP50"
+    if bull_tl_in_hpa
+        bull_aoi_str := bull_aoi_str == "" ? "TL" : bull_aoi_str + "+TL"
+    if bull_liq_grab and bull_in_hpa
+        bull_aoi_str := bull_aoi_str == "" ? "LG" : bull_aoi_str + "+LG"
+if bull_aoi_str == ""
+    bull_aoi_str := "—"
+
+string bear_aoi_str = ""
+if bear_aoi_touched
+    if bear_at_snr
+        bear_aoi_str := "SNR"
+    if bear_at_exp
+        bear_aoi_str := bear_aoi_str == "" ? "EXP50" : bear_aoi_str + "+EXP50"
+    if bear_tl_in_hpa
+        bear_aoi_str := bear_aoi_str == "" ? "TL" : bear_aoi_str + "+TL"
+    if bear_liq_grab and bear_in_hpa
+        bear_aoi_str := bear_aoi_str == "" ? "LG" : bear_aoi_str + "+LG"
+if bear_aoi_str == ""
+    bear_aoi_str := "—"
+
+// ============================================================
 // SECTION 7 — ENTRY SIGNALS
 // ============================================================
-type5_long  = bull_in_hpa and bull_exp_found and dxy_confirm_long  and high[1] > high[2] and in_session
-type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and low[1]  < low[2]  and in_session
+type5_long  = bull_in_hpa and bull_exp_found and dxy_confirm_long  and high[1] > high[2] and in_session and bull_aoi_touched
+type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and low[1]  < low[2]  and in_session and bear_aoi_touched
 
 type5_long_tl  = type5_long  and bull_tl_in_hpa
 type5_short_tl = type5_short and bear_tl_in_hpa
@@ -416,8 +456,8 @@ if bos_bear
     t1_short_e  := pl_valid and ph_valid ?
                    last_ph_price - (last_ph_price - last_pl_price) * 0.5 : na
 
-type1_long  = w_t1_long  and not na(t1_long_e)  and low  <= t1_long_e  and bull_in_hpa and dxy_confirm_long  and in_session
-type1_short = w_t1_short and not na(t1_short_e) and high >= t1_short_e and bear_in_hpa and dxy_confirm_short and in_session
+type1_long  = w_t1_long  and not na(t1_long_e)  and low  <= t1_long_e  and bull_in_hpa and dxy_confirm_long  and in_session and bull_aoi_touched
+type1_short = w_t1_short and not na(t1_short_e) and high >= t1_short_e and bear_in_hpa and dxy_confirm_short and in_session and bear_aoi_touched
 
 if type1_long  or (w_t1_long  and ph_valid and close > last_ph_price * 1.005)
     w_t1_long := false
@@ -674,7 +714,7 @@ if show_labels
     if type5_long
         float rv = (close - _sl_l) > 0 ? (_tp_l - close) / (close - _sl_l) : na
         label.new(bar_index, low,
-             text  = "T5 L\nSL:" + str.tostring(_sl_l, "#.##") +
+             text  = "T5 L [" + bull_aoi_str + "]\nSL:" + str.tostring(_sl_l, "#.##") +
                      "\nTP:" + str.tostring(_tp_l, "#.##") +
                      "\nR:"  + str.tostring(rv,    "#.#")  +
                      (obs_l ? "\n⚠ " + obs_l_what : ""),
@@ -685,7 +725,7 @@ if show_labels
     if type5_short
         float rv = (_sl_s - close) > 0 ? (close - _tp_s) / (_sl_s - close) : na
         label.new(bar_index, high,
-             text  = "T5 S\nSL:" + str.tostring(_sl_s, "#.##") +
+             text  = "T5 S [" + bear_aoi_str + "]\nSL:" + str.tostring(_sl_s, "#.##") +
                      "\nTP:" + str.tostring(_tp_s, "#.##") +
                      "\nR:"  + str.tostring(rv,    "#.#")  +
                      (obs_s ? "\n⚠ " + obs_s_what : ""),
@@ -695,26 +735,26 @@ if show_labels
 
     if type1_long
         label.new(bar_index, low,
-             text  = "T1 L\n@0.5 BOS" + (obs_l ? "\n⚠ " + obs_l_what : ""),
+             text  = "T1 L [" + bull_aoi_str + "]\n@0.5 BOS" + (obs_l ? "\n⚠ " + obs_l_what : ""),
              style=label.style_label_up,
              color=obs_l ? color.new(color.orange, 20) : color.new(color.teal, 20),
              textcolor=color.white, size=size.small)
 
     if type1_short
         label.new(bar_index, high,
-             text  = "T1 S\n@0.5 BOS" + (obs_s ? "\n⚠ " + obs_s_what : ""),
+             text  = "T1 S [" + bear_aoi_str + "]\n@0.5 BOS" + (obs_s ? "\n⚠ " + obs_s_what : ""),
              style=label.style_label_down,
              color=obs_s ? color.new(color.orange, 20) : color.new(color.purple, 20),
              textcolor=color.white, size=size.small)
 
 // ============================================================
-// SECTION 14 — INFO TABLE (right)
+// SECTION 14 — INFO TABLE (right, 16 rows)
 // ============================================================
-var table info_tbl = table.new(position.top_right, 2, 14,
+var table info_tbl = table.new(position.top_right, 2, 16,
      bgcolor=color.new(color.black, 70), border_width=1)
 
 if barstate.islast
-    table.cell(info_tbl, 0,  0, "SNR 3.0 v3",  text_color=color.white,  text_size=size.normal)
+    table.cell(info_tbl, 0,  0, "SNR 3.0 v4",  text_color=color.white,  text_size=size.normal)
     table.cell(info_tbl, 1,  0, syminfo.ticker, text_color=color.yellow, text_size=size.normal)
 
     string mkt_str = is_trend ? (bull_trend ? "Bull Trend" : "Bear Trend") : valid_range ? "Range" : "Unclear"
@@ -735,7 +775,6 @@ if barstate.islast
     table.cell(info_tbl, 1, 4, in_session ? "ACTIVE" : "CLOSED",
          text_color = in_session ? color.lime : color.gray)
 
-    // Expansion quality breakdown
     string bq_str = bull_exp_found ?
          "Q " + str.tostring(bull_q_score) + "/3" +
          (bq_s == 0 ? " !sz" : "") +
@@ -754,37 +793,46 @@ if barstate.islast
     table.cell(info_tbl, 0, 6, "Bear Exp",   text_color=color.gray)
     table.cell(info_tbl, 1, 6, beq_str,      text_color=beq_col)
 
-    string tl_str = bull_tl_in_hpa ? "BULL" : bear_tl_in_hpa ? "BEAR" : "—"
-    color  tl_col = bull_tl_in_hpa ? color.lime : bear_tl_in_hpa ? color.red : color.gray
-    table.cell(info_tbl, 0, 7, "TL in HPA",  text_color=color.gray)
-    table.cell(info_tbl, 1, 7, tl_str,       text_color=tl_col)
+    // rows 7-8: AOI sources currently active
+    table.cell(info_tbl, 0, 7, "Bull AOI",   text_color=color.gray)
+    table.cell(info_tbl, 1, 7, bull_aoi_str,
+         text_color = bull_aoi_touched ? color.lime : color.gray)
 
-    table.cell(info_tbl, 0, 8, "In B.HPA",   text_color=color.gray)
-    table.cell(info_tbl, 1, 8, bull_in_hpa ? "YES" : "NO",
+    table.cell(info_tbl, 0, 8, "Bear AOI",   text_color=color.gray)
+    table.cell(info_tbl, 1, 8, bear_aoi_str,
+         text_color = bear_aoi_touched ? color.red : color.gray)
+
+    table.cell(info_tbl, 0, 9, "In B.HPA",   text_color=color.gray)
+    table.cell(info_tbl, 1, 9, bull_in_hpa ? "YES" : "NO",
          text_color = bull_in_hpa ? color.lime : color.gray)
 
-    table.cell(info_tbl, 0, 9, "In S.HPA",   text_color=color.gray)
-    table.cell(info_tbl, 1, 9, bear_in_hpa ? "YES" : "NO",
+    table.cell(info_tbl, 0, 10, "In S.HPA",  text_color=color.gray)
+    table.cell(info_tbl, 1, 10, bear_in_hpa ? "YES" : "NO",
          text_color = bear_in_hpa ? color.red : color.gray)
 
-    table.cell(info_tbl, 0, 10, "DXY Long",  text_color=color.gray)
-    table.cell(info_tbl, 1, 10, dxy_confirm_long  ? "YES" : "NO",
+    table.cell(info_tbl, 0, 11, "DXY Long",  text_color=color.gray)
+    table.cell(info_tbl, 1, 11, dxy_confirm_long  ? "YES" : "NO",
          text_color = dxy_confirm_long  ? color.lime : color.gray)
 
-    table.cell(info_tbl, 0, 11, "DXY Short", text_color=color.gray)
-    table.cell(info_tbl, 1, 11, dxy_confirm_short ? "YES" : "NO",
+    table.cell(info_tbl, 0, 12, "DXY Short", text_color=color.gray)
+    table.cell(info_tbl, 1, 12, dxy_confirm_short ? "YES" : "NO",
          text_color = dxy_confirm_short ? color.red : color.gray)
 
     string dxy_z = dxy_in_bear_hpa ? "Bear HPA" : dxy_in_bull_hpa ? "Bull HPA" : "—"
     color  dxy_c = dxy_in_bear_hpa ? color.lime  : dxy_in_bull_hpa ? color.red  : color.gray
-    table.cell(info_tbl, 0, 12, "DXY Zone",  text_color=color.gray)
-    table.cell(info_tbl, 1, 12, dxy_z,       text_color=dxy_c)
+    table.cell(info_tbl, 0, 13, "DXY Zone",  text_color=color.gray)
+    table.cell(info_tbl, 1, 13, dxy_z,       text_color=dxy_c)
 
-    table.cell(info_tbl, 0, 13, "TP Block",  text_color=color.gray)
-    table.cell(info_tbl, 1, 13,
+    table.cell(info_tbl, 0, 14, "TP Block",  text_color=color.gray)
+    table.cell(info_tbl, 1, 14,
          (type5_long or type1_long)   and obs_l ? "⚠ " + obs_l_what :
          (type5_short or type1_short) and obs_s ? "⚠ " + obs_s_what : "—",
          text_color = (obs_l or obs_s) ? color.orange : color.gray)
+
+    // row 15: AOI proximity setting (reference)
+    table.cell(info_tbl, 0, 15, "AOI Prox",  text_color=color.gray)
+    table.cell(info_tbl, 1, 15, str.tostring(aoi_prox_ticks, "#") + " tk",
+         text_color=color.gray)
 
 // ============================================================
 // SECTION 15 — STATISTICS TABLE (top-left)
@@ -813,10 +861,10 @@ if show_stats and barstate.islast
 // ============================================================
 alertcondition(type5_long,
      title="SNR3 Type5 Long",
-     message="SNR 3.0 | T5 LONG | " + syminfo.ticker + " | HPA+Exp(Q3)+DXY+Session OK")
+     message="SNR 3.0 | T5 LONG | " + syminfo.ticker + " | HPA+Exp(Q3)+AOI+DXY+Session OK")
 alertcondition(type5_short,
      title="SNR3 Type5 Short",
-     message="SNR 3.0 | T5 SHORT | " + syminfo.ticker + " | HPA+Exp(Q3)+DXY+Session OK")
+     message="SNR 3.0 | T5 SHORT | " + syminfo.ticker + " | HPA+Exp(Q3)+AOI+DXY+Session OK")
 alertcondition(type5_long_tl,
      title="SNR3 Type5 Long + TL AOI",
      message="SNR 3.0 | T5 LONG + 1-1-1 TL | " + syminfo.ticker)
