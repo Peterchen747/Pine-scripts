@@ -61,14 +61,14 @@ bars_per_hour = math.max(1, math.round(60 / timeframe.multiplier))
 lookback_bars = lookback_hrs * bars_per_hour
 
 // ============================================================
-// SESSION FILTER — London 08:00-17:00 UTC, NY 13:00-22:00 UTC
+// SESSION FILTER
 // ============================================================
 sess_london = time(timeframe.period, "0800-1700", "UTC+0")
 sess_ny     = time(timeframe.period, "1300-2200", "UTC+0")
 in_session  = not use_session or (not na(sess_london) or not na(sess_ny))
 
 // ============================================================
-// PIVOT DETECTION  (track last two pivots + bar indices)
+// PIVOT DETECTION
 // ============================================================
 ph = ta.pivothigh(high, swing_len, swing_len)
 pl = ta.pivotlow(low,  swing_len, swing_len)
@@ -95,7 +95,7 @@ if not na(pl)
     last_pl_bar   := bar_index - swing_len
 
 // ============================================================
-// SECTION 1 — MARKET STATE
+// SECTION 1 - MARKET STATE
 // ============================================================
 window_high = ta.highest(high, lookback_bars)
 window_low  = ta.lowest(low,  lookback_bars)
@@ -109,13 +109,13 @@ prev_pl_valid = not na(prev_pl_price) and not na(prev_pl_bar) and (bar_index - p
 
 swing_threshold = window_rng * trend_min_swing / 100.0
 
-hh_hl = ph_valid and prev_ph_valid and pl_valid and prev_pl_valid and
-        (last_ph_price - prev_ph_price) >= swing_threshold and
-        (last_pl_price - prev_pl_price) >= swing_threshold
+hh_hl = (ph_valid and prev_ph_valid and pl_valid and prev_pl_valid and
+         (last_ph_price - prev_ph_price) >= swing_threshold and
+         (last_pl_price - prev_pl_price) >= swing_threshold)
 
-ll_lh = ph_valid and prev_ph_valid and pl_valid and prev_pl_valid and
-        (prev_pl_price - last_pl_price) >= swing_threshold and
-        (prev_ph_price - last_ph_price) >= swing_threshold
+ll_lh = (ph_valid and prev_ph_valid and pl_valid and prev_pl_valid and
+         (prev_pl_price - last_pl_price) >= swing_threshold and
+         (prev_ph_price - last_ph_price) >= swing_threshold)
 
 bull_trend = hh_hl and not ll_lh
 bear_trend = ll_lh and not hh_hl
@@ -135,7 +135,7 @@ mid_cross_count = f_count_mid_crosses(window_mid, lookback_bars)
 valid_range     = not is_trend and mid_cross_count >= 2
 
 // ============================================================
-// SECTION 2 — HPA CALCULATION
+// SECTION 2 - HPA CALCULATION
 // ============================================================
 var float hpa_bull_top = na
 var float hpa_bull_bot = na
@@ -178,7 +178,7 @@ else
     hpa_bear_bot := na
 
 // ============================================================
-// SECTION 2.5 — MULTI-TF HPA REFERENCE (G)
+// SECTION 2.5 - MULTI-TF HPA REFERENCE
 // ============================================================
 _m15_lb = math.max(lookback_hrs * 4, 1)
 m15_wh  = request.security(syminfo.tickerid, "15", ta.highest(high, _m15_lb))
@@ -199,7 +199,7 @@ h1_bear_top  = h1_wh
 h1_bear_bot  = not na(h1_wh)  and not na(h1_rng)  ? h1_wh  - h1_rng  * 0.25 : na
 
 // ============================================================
-// SECTION 3 — EXPANSION LEG DETECTION  (v3: quality scoring)
+// SECTION 3 - EXPANSION LEG DETECTION
 // ============================================================
 f_check_expansion(direction, hpa_top, hpa_bot) =>
     bool  found      = false
@@ -258,9 +258,9 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
 
                     bool ep_ok = false
                     if not na(hpa_top) and not na(hpa_bot)
-                        ep_ok := direction ==  1 ?
+                        ep_ok := (direction ==  1 ?
                              (seg_h >= hpa_bot and seg_h <= hpa_top * 1.01) :
-                             (seg_l <= hpa_top and seg_l >= hpa_bot * 0.99)
+                             (seg_l <= hpa_top and seg_l >= hpa_bot * 0.99))
                     else
                         ep_ok := true
 
@@ -287,8 +287,7 @@ bull_q_score = bq_s + bq_c + bq_m
 bear_q_score = beq_s + beq_c + beq_m
 
 // ============================================================
-// SECTION 3.5 — 1-1-1 TRENDLINE AOI
-// in_hpa requires TL projection inside HPA AND price within proximity
+// SECTION 3.5 - 1-1-1 TRENDLINE AOI
 // ============================================================
 f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
     float tl_now = na
@@ -314,9 +313,7 @@ f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
      hpa_bear_top, hpa_bear_bot)
 
 // ============================================================
-// SECTION 4 — LIQUIDITY GRAB DETECTION
-// ref_low/ref_high use [2] to EXCLUDE the spike bar itself ([1]),
-// ensuring spike = structural_level - spike_bar_low > 0 when grab occurs.
+// SECTION 4 - LIQUIDITY GRAB DETECTION
 // ============================================================
 f_liq_bull() =>
     bool  g       = false
@@ -348,8 +345,7 @@ bull_liq_grab = f_liq_bull()
 bear_liq_grab = f_liq_bear()
 
 // ============================================================
-// SECTION 5 — DXY CONFIRMATION  (D: DXY own HPA)
-// Symbol defaults to TVC:DXY, user-configurable via input
+// SECTION 5 - DXY CONFIRMATION
 // ============================================================
 dxy_close = request.security(dxy_symbol, timeframe.period, close)
 dxy_high  = request.security(dxy_symbol, timeframe.period, high)
@@ -372,31 +368,29 @@ dxy_confirm_long  = not use_dxy or (dxy_dropped and dxy_in_bear_hpa)
 dxy_confirm_short = not use_dxy or (dxy_rallied and dxy_in_bull_hpa)
 
 // ============================================================
-// SECTION 6 — PRICE IN HPA
+// SECTION 6 - PRICE IN HPA
 // ============================================================
-bull_in_hpa = not na(hpa_bull_bot) and not na(hpa_bull_top) and
-              low <= hpa_bull_top and high >= hpa_bull_bot
+bull_in_hpa = (not na(hpa_bull_bot) and not na(hpa_bull_top) and
+               low <= hpa_bull_top and high >= hpa_bull_bot)
 
-bear_in_hpa = not na(hpa_bear_bot) and not na(hpa_bear_top) and
-              high >= hpa_bear_bot and low <= hpa_bear_top
+bear_in_hpa = (not na(hpa_bear_bot) and not na(hpa_bear_top) and
+               high >= hpa_bear_bot and low <= hpa_bear_top)
 
 // ============================================================
-// SECTION 6.5 — AOI PROXIMITY DETECTION
-// Four AOI sources: SNR pivot, Exp50, 1-1-1 TL, Liquidity Grab
-// All checked within aoi_prox_ticks of current price.
+// SECTION 6.5 - AOI PROXIMITY DETECTION
 // ============================================================
 float aoi_buf = syminfo.mintick * aoi_prox_ticks
 
-bool bull_at_snr = pl_valid and not na(last_pl_price) and
-                   high >= last_pl_price - aoi_buf and low <= last_pl_price + aoi_buf
-bool bull_at_exp = bull_exp_found and not na(bull_exp_50) and
-                   high >= bull_exp_50 - aoi_buf and low <= bull_exp_50 + aoi_buf
+bool bull_at_snr = (pl_valid and not na(last_pl_price) and
+                    high >= last_pl_price - aoi_buf and low <= last_pl_price + aoi_buf)
+bool bull_at_exp = (bull_exp_found and not na(bull_exp_50) and
+                    high >= bull_exp_50 - aoi_buf and low <= bull_exp_50 + aoi_buf)
 bool bull_aoi_touched = bull_in_hpa and (bull_at_snr or bull_at_exp or bull_tl_in_hpa or (bull_liq_grab and bull_in_hpa))
 
-bool bear_at_snr = ph_valid and not na(last_ph_price) and
-                   high >= last_ph_price - aoi_buf and low <= last_ph_price + aoi_buf
-bool bear_at_exp = bear_exp_found and not na(bear_exp_50) and
-                   high >= bear_exp_50 - aoi_buf and low <= bear_exp_50 + aoi_buf
+bool bear_at_snr = (ph_valid and not na(last_ph_price) and
+                    high >= last_ph_price - aoi_buf and low <= last_ph_price + aoi_buf)
+bool bear_at_exp = (bear_exp_found and not na(bear_exp_50) and
+                    high >= bear_exp_50 - aoi_buf and low <= bear_exp_50 + aoi_buf)
 bool bear_aoi_touched = bear_in_hpa and (bear_at_snr or bear_at_exp or bear_tl_in_hpa or (bear_liq_grab and bear_in_hpa))
 
 string bull_aoi_str = ""
@@ -426,9 +420,7 @@ if bear_aoi_str == ""
     bear_aoi_str := "—"
 
 // ============================================================
-// SECTION 7 — ENTRY SIGNALS
-// Type 5: AOI touch required (price must be at a known AOI level)
-// Type 1: AOI touch NOT required; the BOS pullback point is itself AOI
+// SECTION 7 - ENTRY SIGNALS
 // ============================================================
 type5_long  = bull_in_hpa and bull_exp_found and dxy_confirm_long  and high[1] > high[2] and in_session and bull_aoi_touched
 type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and low[1]  < low[2]  and in_session and bear_aoi_touched
@@ -446,13 +438,13 @@ var float t1_short_e = na
 
 if bos_bull
     w_t1_long := true
-    t1_long_e  := pl_valid and ph_valid ?
-                  last_pl_price + (last_ph_price - last_pl_price) * 0.5 : na
+    t1_long_e  := (pl_valid and ph_valid ?
+                   last_pl_price + (last_ph_price - last_pl_price) * 0.5 : na)
 
 if bos_bear
     w_t1_short := true
-    t1_short_e  := pl_valid and ph_valid ?
-                   last_ph_price - (last_ph_price - last_pl_price) * 0.5 : na
+    t1_short_e  := (pl_valid and ph_valid ?
+                    last_ph_price - (last_ph_price - last_pl_price) * 0.5 : na)
 
 type1_long  = w_t1_long  and not na(t1_long_e)  and low  <= t1_long_e  and bull_in_hpa and dxy_confirm_long  and in_session
 type1_short = w_t1_short and not na(t1_short_e) and high >= t1_short_e and bear_in_hpa and dxy_confirm_short and in_session
@@ -463,7 +455,7 @@ if type1_short or (w_t1_short and pl_valid and close < last_pl_price * 0.995)
     w_t1_short := false
 
 // ============================================================
-// SECTION 8 — SL / TP + TP OBSTACLE
+// SECTION 8 - SL / TP + TP OBSTACLE
 // ============================================================
 sl_offset = syminfo.mintick * sl_buffer_ticks
 
@@ -521,7 +513,7 @@ float _tp_s         = f_tp_short(close, _sl_s)
 [obs_s, obs_s_what] = f_tp_obs_short(close, _tp_s)
 
 // ============================================================
-// SECTION 9 — SIGNAL STATISTICS
+// SECTION 9 - SIGNAL STATISTICS
 // ============================================================
 var int   stat_total = 0
 var int   stat_wins  = 0
@@ -554,9 +546,9 @@ if any_short and not trk_act
 if trk_act and not na(trk_tp) and not na(trk_sl)
     bool tp_hit = trk_dir ==  1 ? high >= trk_tp : low  <= trk_tp
     bool sl_hit = trk_dir ==  1 ? low  <= trk_sl : high >= trk_sl
-    float r_ach = trk_dir ==  1 ?
+    float r_ach = (trk_dir ==  1 ?
          (trk_tp - trk_ep) / math.max(trk_ep - trk_sl, syminfo.mintick) :
-         (trk_ep - trk_tp) / math.max(trk_sl - trk_ep, syminfo.mintick)
+         (trk_ep - trk_tp) / math.max(trk_sl - trk_ep, syminfo.mintick))
     if tp_hit
         stat_wins  += 1
         stat_sum_r += r_ach
@@ -569,7 +561,7 @@ float stat_winpct = stat_total > 0 ? 100.0 * stat_wins  / stat_total : na
 float stat_avg_r  = stat_total > 0 ? stat_sum_r          / stat_total : na
 
 // ============================================================
-// SECTION 10 — DRAW: HPA BOXES
+// SECTION 10 - DRAW: HPA BOXES
 // ============================================================
 var box hpa_bull_box = na
 var box hpa_bear_box = na
@@ -587,7 +579,7 @@ if show_hpa and barstate.islast
              bgcolor=col_bear_hpa, border_color=color.red, border_width=1)
 
 // ============================================================
-// SECTION 10.5 — DRAW: MTF REFERENCE BOXES
+// SECTION 10.5 - DRAW: MTF REFERENCE BOXES
 // ============================================================
 var box m15_bull_box = na
 var box m15_bear_box = na
@@ -625,7 +617,7 @@ if show_mtf and barstate.islast
              border_style=line.style_dashed)
 
 // ============================================================
-// SECTION 11 — DRAW: EXPANSION BOXES
+// SECTION 11 - DRAW: EXPANSION BOXES
 // ============================================================
 var box bull_exp_box = na
 var box bear_exp_box = na
@@ -643,7 +635,7 @@ if show_aoi and barstate.islast
              bgcolor=col_expansion, border_color=color.blue, border_width=1)
 
 // ============================================================
-// SECTION 12 — DRAW: AOI LINES + 1-1-1 TRENDLINES
+// SECTION 12 - DRAW: AOI LINES + 1-1-1 TRENDLINES
 // ============================================================
 var line aoi_ph_line  = na
 var line aoi_pl_line  = na
@@ -673,21 +665,21 @@ if show_aoi and barstate.islast
              color=color.new(color.blue, 30), width=2, style=line.style_dotted)
 
     if prev_pl_valid and pl_valid and last_pl_bar > prev_pl_bar
-        float sl_b = (last_pl_price - prev_pl_price) / float(last_pl_bar - prev_pl_bar)
-        float y_e  = last_pl_price + sl_b * float(bar_index + 20 - last_pl_bar)
+        float sl_b = (last_pl_price - prev_pl_price) / (last_pl_bar - prev_pl_bar)
+        float y_e  = last_pl_price + sl_b * (bar_index + 20 - last_pl_bar)
         bull_tl_line := line.new(prev_pl_bar, prev_pl_price, bar_index + 20, y_e,
              color=color.new(color.purple, 20), width=1,
              style = bull_tl_in_hpa ? line.style_solid : line.style_dashed)
 
     if prev_ph_valid and ph_valid and last_ph_bar > prev_ph_bar
-        float sl_b = (last_ph_price - prev_ph_price) / float(last_ph_bar - prev_ph_bar)
-        float y_e  = last_ph_price + sl_b * float(bar_index + 20 - last_ph_bar)
+        float sl_b = (last_ph_price - prev_ph_price) / (last_ph_bar - prev_ph_bar)
+        float y_e  = last_ph_price + sl_b * (bar_index + 20 - last_ph_bar)
         bear_tl_line := line.new(prev_ph_bar, prev_ph_price, bar_index + 20, y_e,
              color=color.new(color.purple, 20), width=1,
              style = bear_tl_in_hpa ? line.style_solid : line.style_dashed)
 
 // ============================================================
-// SECTION 13 — SIGNAL PLOTS & LABELS
+// SECTION 13 - SIGNAL PLOTS & LABELS
 // ============================================================
 plotshape(type5_long,     title="Type5 Long",   style=shape.triangleup,
           location=location.belowbar, color=color.lime,                 size=size.normal)
@@ -746,7 +738,7 @@ if show_labels
              textcolor=color.white, size=size.small)
 
 // ============================================================
-// SECTION 14 — INFO TABLE (right, 16 rows)
+// SECTION 14 - INFO TABLE
 // ============================================================
 var table info_tbl = table.new(position.top_right, 2, 16,
      bgcolor=color.new(color.black, 70), border_width=1)
@@ -765,7 +757,7 @@ if barstate.islast
     table.cell(info_tbl, 0, 2, "Structure",  text_color=color.gray)
     table.cell(info_tbl, 1, 2, str_str,      text_color=str_col)
 
-    table.cell(info_tbl, 0, 3, "Mid ×",      text_color=color.gray)
+    table.cell(info_tbl, 0, 3, "Mid x",      text_color=color.gray)
     table.cell(info_tbl, 1, 3, str.tostring(mid_cross_count),
          text_color = mid_cross_count >= 2 ? color.orange : color.gray)
 
@@ -773,47 +765,33 @@ if barstate.islast
     table.cell(info_tbl, 1, 4, in_session ? "ACTIVE" : "CLOSED",
          text_color = in_session ? color.lime : color.gray)
 
-    string bq_str = bull_exp_found ?
-         "Q " + str.tostring(bull_q_score) + "/3" +
-         (bq_s == 0 ? " !sz" : "") +
-         (bq_c == 0 ? " !ct" : "") +
-         (bq_m == 0 ? " !mo" : "") : "NO"
+    string bq_str = bull_exp_found ? "Q " + str.tostring(bull_q_score) + "/3" + (bq_s == 0 ? " !sz" : "") + (bq_c == 0 ? " !ct" : "") + (bq_m == 0 ? " !mo" : "") : "NO"
     color  bq_col = bull_exp_found ? (bull_q_score == 3 ? color.lime : color.orange) : color.gray
     table.cell(info_tbl, 0, 5, "Bull Exp",   text_color=color.gray)
     table.cell(info_tbl, 1, 5, bq_str,       text_color=bq_col)
 
-    string beq_str = bear_exp_found ?
-         "Q " + str.tostring(bear_q_score) + "/3" +
-         (beq_s == 0 ? " !sz" : "") +
-         (beq_c == 0 ? " !ct" : "") +
-         (beq_m == 0 ? " !mo" : "") : "NO"
+    string beq_str = bear_exp_found ? "Q " + str.tostring(bear_q_score) + "/3" + (beq_s == 0 ? " !sz" : "") + (beq_c == 0 ? " !ct" : "") + (beq_m == 0 ? " !mo" : "") : "NO"
     color  beq_col = bear_exp_found ? (bear_q_score == 3 ? color.red : color.orange) : color.gray
     table.cell(info_tbl, 0, 6, "Bear Exp",   text_color=color.gray)
     table.cell(info_tbl, 1, 6, beq_str,      text_color=beq_col)
 
     table.cell(info_tbl, 0, 7, "Bull AOI",   text_color=color.gray)
-    table.cell(info_tbl, 1, 7, bull_aoi_str,
-         text_color = bull_aoi_touched ? color.lime : color.gray)
+    table.cell(info_tbl, 1, 7, bull_aoi_str, text_color = bull_aoi_touched ? color.lime : color.gray)
 
     table.cell(info_tbl, 0, 8, "Bear AOI",   text_color=color.gray)
-    table.cell(info_tbl, 1, 8, bear_aoi_str,
-         text_color = bear_aoi_touched ? color.red : color.gray)
+    table.cell(info_tbl, 1, 8, bear_aoi_str, text_color = bear_aoi_touched ? color.red : color.gray)
 
     table.cell(info_tbl, 0, 9, "In B.HPA",   text_color=color.gray)
-    table.cell(info_tbl, 1, 9, bull_in_hpa ? "YES" : "NO",
-         text_color = bull_in_hpa ? color.lime : color.gray)
+    table.cell(info_tbl, 1, 9, bull_in_hpa ? "YES" : "NO", text_color = bull_in_hpa ? color.lime : color.gray)
 
     table.cell(info_tbl, 0, 10, "In S.HPA",  text_color=color.gray)
-    table.cell(info_tbl, 1, 10, bear_in_hpa ? "YES" : "NO",
-         text_color = bear_in_hpa ? color.red : color.gray)
+    table.cell(info_tbl, 1, 10, bear_in_hpa ? "YES" : "NO", text_color = bear_in_hpa ? color.red : color.gray)
 
     table.cell(info_tbl, 0, 11, "DXY Long",  text_color=color.gray)
-    table.cell(info_tbl, 1, 11, dxy_confirm_long  ? "YES" : "NO",
-         text_color = dxy_confirm_long  ? color.lime : color.gray)
+    table.cell(info_tbl, 1, 11, dxy_confirm_long  ? "YES" : "NO", text_color = dxy_confirm_long  ? color.lime : color.gray)
 
     table.cell(info_tbl, 0, 12, "DXY Short", text_color=color.gray)
-    table.cell(info_tbl, 1, 12, dxy_confirm_short ? "YES" : "NO",
-         text_color = dxy_confirm_short ? color.red : color.gray)
+    table.cell(info_tbl, 1, 12, dxy_confirm_short ? "YES" : "NO", text_color = dxy_confirm_short ? color.red : color.gray)
 
     string dxy_z = dxy_in_bear_hpa ? "Bear HPA" : dxy_in_bull_hpa ? "Bull HPA" : "—"
     color  dxy_c = dxy_in_bear_hpa ? color.lime  : dxy_in_bull_hpa ? color.red  : color.gray
@@ -821,17 +799,14 @@ if barstate.islast
     table.cell(info_tbl, 1, 13, dxy_z,       text_color=dxy_c)
 
     table.cell(info_tbl, 0, 14, "TP Block",  text_color=color.gray)
-    table.cell(info_tbl, 1, 14,
-         (type5_long or type1_long)   and obs_l ? "⚠ " + obs_l_what :
-         (type5_short or type1_short) and obs_s ? "⚠ " + obs_s_what : "—",
+    table.cell(info_tbl, 1, 14, (type5_long or type1_long) and obs_l ? "! " + obs_l_what : (type5_short or type1_short) and obs_s ? "! " + obs_s_what : "—",
          text_color = (obs_l or obs_s) ? color.orange : color.gray)
 
     table.cell(info_tbl, 0, 15, "AOI Prox",  text_color=color.gray)
-    table.cell(info_tbl, 1, 15, str.tostring(aoi_prox_ticks, "#") + " tk",
-         text_color=color.gray)
+    table.cell(info_tbl, 1, 15, str.tostring(aoi_prox_ticks, "#") + " tk", text_color=color.gray)
 
 // ============================================================
-// SECTION 15 — STATISTICS TABLE (top-left)
+// SECTION 15 - STATISTICS TABLE
 // ============================================================
 var table stat_tbl = table.new(position.top_left, 2, 5,
      bgcolor=color.new(color.black, 70), border_width=1)
@@ -844,16 +819,14 @@ if show_stats and barstate.islast
     table.cell(stat_tbl, 0, 2, "Wins",    text_color=color.gray)
     table.cell(stat_tbl, 1, 2, str.tostring(stat_wins),  text_color=color.lime)
     table.cell(stat_tbl, 0, 3, "Win %",   text_color=color.gray)
-    table.cell(stat_tbl, 1, 3,
-         not na(stat_winpct) ? str.tostring(stat_winpct, "#.#") + "%" : "—",
+    table.cell(stat_tbl, 1, 3, not na(stat_winpct) ? str.tostring(stat_winpct, "#.#") + "%" : "—",
          text_color = not na(stat_winpct) and stat_winpct >= 50 ? color.lime : color.orange)
     table.cell(stat_tbl, 0, 4, "Avg R",   text_color=color.gray)
-    table.cell(stat_tbl, 1, 4,
-         not na(stat_avg_r) ? str.tostring(stat_avg_r, "#.##") : "—",
+    table.cell(stat_tbl, 1, 4, not na(stat_avg_r) ? str.tostring(stat_avg_r, "#.##") : "—",
          text_color = not na(stat_avg_r) and stat_avg_r > 0 ? color.lime : color.red)
 
 // ============================================================
-// SECTION 16 — ALERTS
+// SECTION 16 - ALERTS
 // ============================================================
 alertcondition(type5_long,
      title="SNR3 Type5 Long",
@@ -881,7 +854,7 @@ alertcondition(bear_liq_grab and bear_in_hpa and bear_exp_found and dxy_confirm_
      message="SNR 3.0 | BEAR LG in HPA | " + syminfo.ticker)
 alertcondition((type5_long or type1_long) and obs_l,
      title="SNR3 TP Obstacle (Long)",
-     message="SNR 3.0 | ⚠ TP Obstacle LONG | " + syminfo.ticker)
+     message="SNR 3.0 | TP Obstacle LONG | " + syminfo.ticker)
 alertcondition((type5_short or type1_short) and obs_s,
      title="SNR3 TP Obstacle (Short)",
-     message="SNR 3.0 | ⚠ TP Obstacle SHORT | " + syminfo.ticker)
+     message="SNR 3.0 | TP Obstacle SHORT | " + syminfo.ticker)
