@@ -55,7 +55,6 @@ col_expansion   = input.color(color.new(color.blue,  70), "Expansion Color", gro
 
 // ============================================================
 // LOOKBACK BARS
-// Clamped to min 1 to avoid zero on H1+ timeframes
 // ============================================================
 bars_per_hour = math.max(1, math.round(60 / timeframe.multiplier))
 lookback_bars = lookback_hrs * bars_per_hour
@@ -346,6 +345,7 @@ bear_liq_grab = f_liq_bear()
 
 // ============================================================
 // SECTION 5 - DXY CONFIRMATION
+// Always compute ta.highest/ta.lowest globally (not inside &&)
 // ============================================================
 dxy_close = request.security(dxy_symbol, timeframe.period, close)
 dxy_high  = request.security(dxy_symbol, timeframe.period, high)
@@ -360,9 +360,11 @@ dxy_bull_hpa_top = not na(dxy_wl) and not na(dxy_wrng) ? dxy_wl + dxy_wrng * 0.2
 dxy_in_bear_hpa = not na(dxy_close) and not na(dxy_bear_hpa_bot) and dxy_close >= dxy_bear_hpa_bot
 dxy_in_bull_hpa = not na(dxy_close) and not na(dxy_bull_hpa_top) and dxy_close <= dxy_bull_hpa_top
 
-float dxy_sf = dxy_sensitivity / 100.0
-dxy_dropped  = not na(dxy_close) and dxy_close < ta.highest(dxy_high, dxy_lookback) * (1.0 - dxy_sf)
-dxy_rallied  = not na(dxy_close) and dxy_close > ta.lowest(dxy_low,   dxy_lookback) * (1.0 + dxy_sf)
+float dxy_sf     = dxy_sensitivity / 100.0
+_dxy_peak        = ta.highest(dxy_high, dxy_lookback)
+_dxy_trough      = ta.lowest(dxy_low,   dxy_lookback)
+dxy_dropped      = not na(dxy_close) and dxy_close < _dxy_peak   * (1.0 - dxy_sf)
+dxy_rallied      = not na(dxy_close) and dxy_close > _dxy_trough * (1.0 + dxy_sf)
 
 dxy_confirm_long  = not use_dxy or (dxy_dropped and dxy_in_bear_hpa)
 dxy_confirm_short = not use_dxy or (dxy_rallied and dxy_in_bull_hpa)
@@ -404,7 +406,7 @@ if bull_aoi_touched
     if bull_liq_grab and bull_in_hpa
         bull_aoi_str := bull_aoi_str == "" ? "LG" : bull_aoi_str + "+LG"
 if bull_aoi_str == ""
-    bull_aoi_str := "—"
+    bull_aoi_str := "-"
 
 string bear_aoi_str = ""
 if bear_aoi_touched
@@ -417,10 +419,11 @@ if bear_aoi_touched
     if bear_liq_grab and bear_in_hpa
         bear_aoi_str := bear_aoi_str == "" ? "LG" : bear_aoi_str + "+LG"
 if bear_aoi_str == ""
-    bear_aoi_str := "—"
+    bear_aoi_str := "-"
 
 // ============================================================
 // SECTION 7 - ENTRY SIGNALS
+// ta.crossover/crossunder computed globally (not inside &&)
 // ============================================================
 type5_long  = bull_in_hpa and bull_exp_found and dxy_confirm_long  and high[1] > high[2] and in_session and bull_aoi_touched
 type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and low[1]  < low[2]  and in_session and bear_aoi_touched
@@ -428,8 +431,10 @@ type5_short = bear_in_hpa and bear_exp_found and dxy_confirm_short and low[1]  <
 type5_long_tl  = type5_long  and bull_tl_in_hpa
 type5_short_tl = type5_short and bear_tl_in_hpa
 
-bos_bull = not na(last_ph_price) and ta.crossover(close,  last_ph_price)
-bos_bear = not na(last_pl_price) and ta.crossunder(close, last_pl_price)
+_bos_bull_x = ta.crossover(close,  nz(last_ph_price, high + syminfo.mintick))
+_bos_bear_x = ta.crossunder(close, nz(last_pl_price, low  - syminfo.mintick))
+bos_bull = not na(last_ph_price) and _bos_bull_x
+bos_bear = not na(last_pl_price) and _bos_bear_x
 
 var bool  w_t1_long  = false
 var bool  w_t1_short = false
@@ -482,7 +487,7 @@ f_tp_obs_long(ep, tp) =>
     string wh = ""
     if ph_valid and not na(last_ph_price) and last_ph_price > ep and last_ph_price < tp
         ob := true
-        wh := "SNR↑"
+        wh := "SNR^"
     if valid_range and window_mid > ep and window_mid < tp
         ob := true
         wh := (wh == "" ? "" : wh + "+") + "MID"
@@ -496,7 +501,7 @@ f_tp_obs_short(ep, tp) =>
     string wh = ""
     if pl_valid and not na(last_pl_price) and last_pl_price < ep and last_pl_price > tp
         ob := true
-        wh := "SNR↓"
+        wh := "SNRv"
     if valid_range and window_mid < ep and window_mid > tp
         ob := true
         wh := (wh == "" ? "" : wh + "+") + "MID"
@@ -707,7 +712,7 @@ if show_labels
              text  = "T5 L [" + bull_aoi_str + "]\nSL:" + str.tostring(_sl_l, "#.##") +
                      "\nTP:" + str.tostring(_tp_l, "#.##") +
                      "\nR:"  + str.tostring(rv,    "#.#")  +
-                     (obs_l ? "\n⚠ " + obs_l_what : ""),
+                     (obs_l ? "\n! " + obs_l_what : ""),
              style=label.style_label_up,
              color=obs_l ? color.new(color.orange, 20) : color.new(color.green, 20),
              textcolor=color.white, size=size.small)
@@ -718,21 +723,21 @@ if show_labels
              text  = "T5 S [" + bear_aoi_str + "]\nSL:" + str.tostring(_sl_s, "#.##") +
                      "\nTP:" + str.tostring(_tp_s, "#.##") +
                      "\nR:"  + str.tostring(rv,    "#.#")  +
-                     (obs_s ? "\n⚠ " + obs_s_what : ""),
+                     (obs_s ? "\n! " + obs_s_what : ""),
              style=label.style_label_down,
              color=obs_s ? color.new(color.orange, 20) : color.new(color.red, 20),
              textcolor=color.white, size=size.small)
 
     if type1_long
         label.new(bar_index, low,
-             text  = "T1 L\n@0.5 BOS" + (obs_l ? "\n⚠ " + obs_l_what : ""),
+             text  = "T1 L\n@0.5 BOS" + (obs_l ? "\n! " + obs_l_what : ""),
              style=label.style_label_up,
              color=obs_l ? color.new(color.orange, 20) : color.new(color.teal, 20),
              textcolor=color.white, size=size.small)
 
     if type1_short
         label.new(bar_index, high,
-             text  = "T1 S\n@0.5 BOS" + (obs_s ? "\n⚠ " + obs_s_what : ""),
+             text  = "T1 S\n@0.5 BOS" + (obs_s ? "\n! " + obs_s_what : ""),
              style=label.style_label_down,
              color=obs_s ? color.new(color.orange, 20) : color.new(color.purple, 20),
              textcolor=color.white, size=size.small)
@@ -793,13 +798,13 @@ if barstate.islast
     table.cell(info_tbl, 0, 12, "DXY Short", text_color=color.gray)
     table.cell(info_tbl, 1, 12, dxy_confirm_short ? "YES" : "NO", text_color = dxy_confirm_short ? color.red : color.gray)
 
-    string dxy_z = dxy_in_bear_hpa ? "Bear HPA" : dxy_in_bull_hpa ? "Bull HPA" : "—"
+    string dxy_z = dxy_in_bear_hpa ? "Bear HPA" : dxy_in_bull_hpa ? "Bull HPA" : "-"
     color  dxy_c = dxy_in_bear_hpa ? color.lime  : dxy_in_bull_hpa ? color.red  : color.gray
     table.cell(info_tbl, 0, 13, "DXY Zone",  text_color=color.gray)
     table.cell(info_tbl, 1, 13, dxy_z,       text_color=dxy_c)
 
     table.cell(info_tbl, 0, 14, "TP Block",  text_color=color.gray)
-    table.cell(info_tbl, 1, 14, (type5_long or type1_long) and obs_l ? "! " + obs_l_what : (type5_short or type1_short) and obs_s ? "! " + obs_s_what : "—",
+    table.cell(info_tbl, 1, 14, (type5_long or type1_long) and obs_l ? "! " + obs_l_what : (type5_short or type1_short) and obs_s ? "! " + obs_s_what : "-",
          text_color = (obs_l or obs_s) ? color.orange : color.gray)
 
     table.cell(info_tbl, 0, 15, "AOI Prox",  text_color=color.gray)
@@ -819,42 +824,43 @@ if show_stats and barstate.islast
     table.cell(stat_tbl, 0, 2, "Wins",    text_color=color.gray)
     table.cell(stat_tbl, 1, 2, str.tostring(stat_wins),  text_color=color.lime)
     table.cell(stat_tbl, 0, 3, "Win %",   text_color=color.gray)
-    table.cell(stat_tbl, 1, 3, not na(stat_winpct) ? str.tostring(stat_winpct, "#.#") + "%" : "—",
+    table.cell(stat_tbl, 1, 3, not na(stat_winpct) ? str.tostring(stat_winpct, "#.#") + "%" : "-",
          text_color = not na(stat_winpct) and stat_winpct >= 50 ? color.lime : color.orange)
     table.cell(stat_tbl, 0, 4, "Avg R",   text_color=color.gray)
-    table.cell(stat_tbl, 1, 4, not na(stat_avg_r) ? str.tostring(stat_avg_r, "#.##") : "—",
+    table.cell(stat_tbl, 1, 4, not na(stat_avg_r) ? str.tostring(stat_avg_r, "#.##") : "-",
          text_color = not na(stat_avg_r) and stat_avg_r > 0 ? color.lime : color.red)
 
 // ============================================================
 // SECTION 16 - ALERTS
+// Messages use {{ticker}} placeholder (const string required in v6)
 // ============================================================
 alertcondition(type5_long,
      title="SNR3 Type5 Long",
-     message="SNR 3.0 | T5 LONG | " + syminfo.ticker + " | HPA+Exp(Q3)+AOI+DXY+Session OK")
+     message="SNR 3.0 | T5 LONG | {{ticker}} | HPA+Exp(Q3)+AOI+DXY+Session OK")
 alertcondition(type5_short,
      title="SNR3 Type5 Short",
-     message="SNR 3.0 | T5 SHORT | " + syminfo.ticker + " | HPA+Exp(Q3)+AOI+DXY+Session OK")
+     message="SNR 3.0 | T5 SHORT | {{ticker}} | HPA+Exp(Q3)+AOI+DXY+Session OK")
 alertcondition(type5_long_tl,
      title="SNR3 Type5 Long + TL AOI",
-     message="SNR 3.0 | T5 LONG + 1-1-1 TL | " + syminfo.ticker)
+     message="SNR 3.0 | T5 LONG + 1-1-1 TL | {{ticker}}")
 alertcondition(type5_short_tl,
      title="SNR3 Type5 Short + TL AOI",
-     message="SNR 3.0 | T5 SHORT + 1-1-1 TL | " + syminfo.ticker)
+     message="SNR 3.0 | T5 SHORT + 1-1-1 TL | {{ticker}}")
 alertcondition(type1_long,
      title="SNR3 Type1 Long",
-     message="SNR 3.0 | T1 LONG BOS retrace | " + syminfo.ticker)
+     message="SNR 3.0 | T1 LONG BOS retrace | {{ticker}}")
 alertcondition(type1_short,
      title="SNR3 Type1 Short",
-     message="SNR 3.0 | T1 SHORT BOS retrace | " + syminfo.ticker)
+     message="SNR 3.0 | T1 SHORT BOS retrace | {{ticker}}")
 alertcondition(bull_liq_grab and bull_in_hpa and bull_exp_found and dxy_confirm_long,
      title="SNR3 Bull Liq Grab in HPA",
-     message="SNR 3.0 | BULL LG in HPA | " + syminfo.ticker)
+     message="SNR 3.0 | BULL LG in HPA | {{ticker}}")
 alertcondition(bear_liq_grab and bear_in_hpa and bear_exp_found and dxy_confirm_short,
      title="SNR3 Bear Liq Grab in HPA",
-     message="SNR 3.0 | BEAR LG in HPA | " + syminfo.ticker)
+     message="SNR 3.0 | BEAR LG in HPA | {{ticker}}")
 alertcondition((type5_long or type1_long) and obs_l,
      title="SNR3 TP Obstacle (Long)",
-     message="SNR 3.0 | TP Obstacle LONG | " + syminfo.ticker)
+     message="SNR 3.0 | TP Obstacle LONG | {{ticker}}")
 alertcondition((type5_short or type1_short) and obs_s,
      title="SNR3 TP Obstacle (Short)",
-     message="SNR 3.0 | TP Obstacle SHORT | " + syminfo.ticker)
+     message="SNR 3.0 | TP Obstacle SHORT | {{ticker}}")
