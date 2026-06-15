@@ -1,5 +1,5 @@
-//@version=5
-indicator("SNR 3.0 HPA Reaction Model v5", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
+//@version=6
+indicator("SNR 3.0 HPA Reaction Model v6", overlay=true, max_boxes_count=30, max_lines_count=60, max_labels_count=60)
 
 // ============================================================
 // INPUT PARAMETERS
@@ -270,7 +270,6 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
 
                     if ep_ok and size_ok and cont_ok and mom_ok
                         found      := true
-                        // bar_index - (lb-1) is the oldest bar of the scanned segment
                         exp_start  := bar_index - (lb - 1)
                         exp_end    := bar_index
                         exp_low_p  := seg_l
@@ -278,10 +277,8 @@ f_check_expansion(direction, hpa_top, hpa_bot) =>
 
     [found, exp_start, exp_end, exp_low_p, exp_high_p, q_size, q_cont, q_mom]
 
-[bull_exp_found, bull_exp_start, bull_exp_end, bull_exp_low, bull_exp_high, bq_s, bq_c, bq_m] =
-     f_check_expansion(1,  hpa_bull_top, hpa_bull_bot)
-[bear_exp_found, bear_exp_start, bear_exp_end, bear_exp_low, bear_exp_high, beq_s, beq_c, beq_m] =
-     f_check_expansion(-1, hpa_bear_top, hpa_bear_bot)
+[bull_exp_found, bull_exp_start, bull_exp_end, bull_exp_low, bull_exp_high, bq_s, bq_c, bq_m] = f_check_expansion(1,  hpa_bull_top, hpa_bull_bot)
+[bear_exp_found, bear_exp_start, bear_exp_end, bear_exp_low, bear_exp_high, beq_s, beq_c, beq_m] = f_check_expansion(-1, hpa_bear_top, hpa_bear_bot)
 
 bull_exp_50 = not na(bull_exp_low) and not na(bull_exp_high) ? (bull_exp_low  + bull_exp_high) / 2 : na
 bear_exp_50 = not na(bear_exp_low) and not na(bear_exp_high) ? (bear_exp_low  + bear_exp_high) / 2 : na
@@ -297,8 +294,8 @@ f_tl111(x1, y1, x2, y2, hpa_top, hpa_bot) =>
     float tl_now = na
     bool  in_hpa = false
     if not na(x1) and not na(y1) and not na(x2) and not na(y2) and x2 > x1
-        float slope = (y2 - y1) / float(x2 - x1)
-        tl_now     := y2 + slope * float(bar_index - x2)
+        float slope = (y2 - y1) / (x2 - x1)
+        tl_now     := y2 + slope * (bar_index - x2)
         if not na(hpa_top) and not na(hpa_bot)
             float prox    = syminfo.mintick * aoi_prox_ticks
             bool  in_zone = tl_now >= hpa_bot and tl_now <= hpa_top
@@ -755,7 +752,7 @@ var table info_tbl = table.new(position.top_right, 2, 16,
      bgcolor=color.new(color.black, 70), border_width=1)
 
 if barstate.islast
-    table.cell(info_tbl, 0,  0, "SNR 3.0 v5",  text_color=color.white,  text_size=size.normal)
+    table.cell(info_tbl, 0,  0, "SNR 3.0 v6",  text_color=color.white,  text_size=size.normal)
     table.cell(info_tbl, 1,  0, syminfo.ticker, text_color=color.yellow, text_size=size.normal)
 
     string mkt_str = is_trend ? (bull_trend ? "Bull Trend" : "Bear Trend") : valid_range ? "Range" : "Unclear"
